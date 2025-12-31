@@ -1,0 +1,5 @@
+{
+  "name": "React CAD",
+  "description": "一個在瀏覽器中運行的精確 2D CAD 應用程式。功能包括畫線、鎖點、修剪、標註和視圖控制。",
+  "requestFramePermissions": []
+}
