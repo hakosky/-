@@ -73,7 +73,8 @@ const App: React.FC = () => {
   const [hasMoved, setHasMoved] = useState(false);
 
   // Multi-touch & Settings State
-  const pointers = useRef<Map<number, Point>>(new Map());
+  // FIX: Store pointer type to distinguish between 'touch' (finger) and 'pen' (stylus)
+  const pointers = useRef<Map<number, { x: number; y: number; type: string }>>(new Map());
   const prevPinchDist = useRef<number | null>(null);
   const prevPinchCenter = useRef<Point | null>(null);
   const [isTouchMoveEnabled, setIsTouchMoveEnabled] = useState(false);
@@ -130,6 +131,7 @@ const App: React.FC = () => {
           setDraggingLine(null);
           setDraggingCircle(null);
           setDragAnchor(null);
+          setDragOriginalLine(null);
           setDragOriginalLine(null);
           setDragOriginalCircle(null);
         }
@@ -442,7 +444,8 @@ const App: React.FC = () => {
   // Interaction Logic (Pointer Events)
   const handlePointerDown = (e: React.PointerEvent) => {
     // Add pointer to cache
-    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    // FIX: Store pointer type (pen/touch/mouse) to handle palm rejection in multi-touch
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
     (e.target as Element).setPointerCapture(e.pointerId);
 
     if (e.pointerType === 'touch') {
@@ -701,22 +704,24 @@ const App: React.FC = () => {
 
   const handlePointerMove = (e: React.PointerEvent) => {
     // Update pointer position
-    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    // FIX: Update pointer with type
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
 
     // --- Multi-touch Logic ---
-    // If 2 fingers are present, we ENABLE pinch zoom/pan even if isTouchMoveEnabled is false.
-    // This allows natural zoom gestures in Pan mode or any other mode.
-    if (pointers.current.size === 2) {
+    // FIX: Filter to ensure we only have 2 TOUCH points (fingers). 
+    // This ignores the pen (type='pen') combined with a palm (type='touch') triggering zoom.
+    const activePointers = Array.from(pointers.current.values()) as { x: number; y: number; type: string }[];
+    const touchPointers = activePointers.filter(p => p.type === 'touch');
+
+    // Only enable pinch zoom if exactly 2 FINGERS are touching.
+    if (touchPointers.length === 2) {
        // Disable single finger panning to prevent conflict/jitter
        if (isPanning) setIsPanning(false);
 
        if (mode === 'move') return; // Disable pinch zoom/pan in move segment mode if strictly required, or allow it. Let's block it for safety during precise move.
 
-       const points = Array.from(pointers.current.values()) as Point[];
-       const p1 = points[0];
-       const p2 = points[1];
-
-       if (!p1 || !p2) return;
+       const p1 = touchPointers[0];
+       const p2 = touchPointers[1];
 
        const currentDist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
        const currentCenter = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
@@ -874,7 +879,10 @@ const App: React.FC = () => {
   const handlePointerUp = (e: React.PointerEvent) => {
     // Remove pointer
     pointers.current.delete(e.pointerId);
-    if (pointers.current.size < 2) {
+    
+    // Check remaining touch pointers to reset pinch if needed
+    const touchPointers = (Array.from(pointers.current.values()) as { x: number; y: number; type: string }[]).filter(p => p.type === 'touch');
+    if (touchPointers.length < 2) {
        prevPinchDist.current = null;
        prevPinchCenter.current = null;
     }
