@@ -12,6 +12,14 @@ export interface Line {
   selected?: boolean;
 }
 
+export interface Circle {
+  id: number;
+  cx: number;
+  cy: number;
+  r: number;
+  selected?: boolean;
+}
+
 export interface Dimension {
   id: number;
   type: 'dist' | 'angle';
@@ -26,7 +34,7 @@ export interface Dimension {
 }
 
 export interface SnapPoint extends Point {
-  type: 'endpoint' | 'grid';
+  type: 'endpoint' | 'grid' | 'center' | 'intersection';
 }
 
 export type ToolMode = 
@@ -37,6 +45,7 @@ export type ToolMode =
   | 'draw_fixed_h' 
   | 'draw_fixed_v' 
   | 'draw_fixed_a' 
+  | 'draw_circle'
   | 'trim' 
   | 'extend'
   | 'dim_dist'

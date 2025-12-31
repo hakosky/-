@@ -2,22 +2,27 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { 
   MousePointer2, PenTool, Minus, MoveVertical, 
   Scissors, ArrowUpRight, Ruler, Eraser, Hand,
-  Trash2, RotateCw, Undo2, Redo2, Maximize, Move
+  Trash2, RotateCw, Undo2, Redo2, Maximize, Move,
+  Circle as CircleIcon, ZoomIn, ZoomOut,
+  Expand // Icon for Wallpaper Move
 } from 'lucide-react';
 import { ToolButton } from './components/ToolButton';
 import { dist, getIntersection, getLineIntersection, distToSegment } from './utils';
 import { GRID_SIZE, SNAP_RADIUS } from './constants';
-import { Line, Point, Dimension, SnapPoint, ToolMode } from './types';
+import { Line, Circle, Point, Dimension, SnapPoint, ToolMode } from './types';
+
+const WALLPAPER_SIZE = 5000;
 
 const getToolName = (mode: ToolMode): string => {
   const names: Record<ToolMode, string> = {
     'select': '選取',
-    'move': '移動',
+    'move': '移動線段',
     'pan': '平移',
     'draw_poly': '畫線',
     'draw_fixed_h': '水平線',
     'draw_fixed_v': '垂直線',
     'draw_fixed_a': '角度線',
+    'draw_circle': '畫圓(直徑)',
     'trim': '修剪',
     'extend': '延伸',
     'dim_dist': '長度標註',
@@ -28,11 +33,13 @@ const getToolName = (mode: ToolMode): string => {
 
 interface HistoryState {
   lines: Line[];
+  circles: Circle[];
   dims: Dimension[];
 }
 
 const App: React.FC = () => {
   const [lines, setLines] = useState<Line[]>([]);
+  const [circles, setCircles] = useState<Circle[]>([]);
   const [dims, setDims] = useState<Dimension[]>([]);
   const [mode, setMode] = useState<ToolMode>('select');
   const [message, setMessage] = useState("歡迎使用 CAD 工具");
@@ -52,10 +59,20 @@ const App: React.FC = () => {
   const [snapPos, setSnapPos] = useState<SnapPoint | null>(null);
   const [interactionPoints, setInteractionPoints] = useState<Point[]>([]);
   const [selectedLinesForTool, setSelectedLinesForTool] = useState<Line[]>([]); 
+  
+  // Dragging State
   const [draggingLine, setDraggingLine] = useState<Line | null>(null);
+  const [draggingCircle, setDraggingCircle] = useState<Circle | null>(null);
+  
   const [dragStartPos, setDragStartPos] = useState<Point | null>(null);
   const [dragAnchor, setDragAnchor] = useState<'start' | 'end' | null>(null);
   const [hasMoved, setHasMoved] = useState(false);
+
+  // Multi-touch & Settings State
+  const pointers = useRef<Map<number, Point>>(new Map());
+  const prevPinchDist = useRef<number | null>(null);
+  const prevPinchCenter = useRef<Point | null>(null);
+  const [isTouchMoveEnabled, setIsTouchMoveEnabled] = useState(false);
 
   // Parameters
   const [paramLength, setParamLength] = useState<string>("100");
@@ -65,29 +82,31 @@ const App: React.FC = () => {
 
   // --- History Management ---
   const saveToHistory = useCallback(() => {
-    setHistory(prev => [...prev, { lines, dims }]);
+    setHistory(prev => [...prev, { lines, circles, dims }]);
     setRedoStack([]); 
-  }, [lines, dims]);
+  }, [lines, circles, dims]);
 
   const undo = useCallback(() => {
     if (history.length === 0) return;
     const previous = history[history.length - 1];
-    setRedoStack(prev => [...prev, { lines, dims }]);
+    setRedoStack(prev => [...prev, { lines, circles, dims }]);
     setLines(previous.lines);
+    setCircles(previous.circles);
     setDims(previous.dims);
     setHistory(prev => prev.slice(0, -1));
     setMessage("已返回上一步");
-  }, [history, lines, dims]);
+  }, [history, lines, circles, dims]);
 
   const redo = useCallback(() => {
     if (redoStack.length === 0) return;
     const next = redoStack[redoStack.length - 1];
-    setHistory(prev => [...prev, { lines, dims }]);
+    setHistory(prev => [...prev, { lines, circles, dims }]);
     setLines(next.lines);
+    setCircles(next.circles);
     setDims(next.dims);
     setRedoStack(prev => prev.slice(0, -1));
     setMessage("已重做");
-  }, [redoStack, lines, dims]);
+  }, [redoStack, lines, circles, dims]);
 
   // Global Key Handlers
   useEffect(() => {
@@ -103,8 +122,9 @@ const App: React.FC = () => {
       }
 
       if (e.key === 'Escape') {
-        if (draggingLine) {
+        if (draggingLine || draggingCircle) {
           setDraggingLine(null);
+          setDraggingCircle(null);
           setDragAnchor(null);
         }
         if (interactionPoints.length > 0 || selectedLinesForTool.length > 0) {
@@ -117,10 +137,11 @@ const App: React.FC = () => {
         }
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
         if (mode === 'select' || mode === 'move') {
-           const hasSelection = lines.some(l => l.selected) || dims.some(d => d.selected);
+           const hasSelection = lines.some(l => l.selected) || dims.some(d => d.selected) || circles.some(c => c.selected);
            if (hasSelection) {
              saveToHistory();
              setLines(prev => prev.filter(l => !l.selected));
+             setCircles(prev => prev.filter(c => !c.selected));
              setDims(prev => prev.filter(d => !d.selected));
              setMessage("已刪除物件");
            }
@@ -129,7 +150,7 @@ const App: React.FC = () => {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [mode, interactionPoints, selectedLinesForTool, draggingLine, history, redoStack, undo, redo, lines, dims, saveToHistory]);
+  }, [mode, interactionPoints, selectedLinesForTool, draggingLine, draggingCircle, history, redoStack, undo, redo, lines, circles, dims, saveToHistory]);
 
   // Coordinate System
   const screenToWorld = useCallback((clientX: number, clientY: number): Point => {
@@ -141,13 +162,13 @@ const App: React.FC = () => {
     };
   }, [offset, scale]);
 
-  const getSnappedPos = useCallback((worldPos: Point, excludeLineId?: number): SnapPoint => {
+  const getSnappedPos = useCallback((worldPos: Point, excludeId?: number): SnapPoint => {
     let closest: SnapPoint | null = null;
     let minD = SNAP_RADIUS / scale;
 
+    // 1. Snap to line endpoints
     lines.forEach(line => {
-      if (excludeLineId && line.id === excludeLineId) return; 
-
+      if (excludeId && line.id === excludeId) return; 
       const points: Point[] = [{x: line.x1, y: line.y1}, {x: line.x2, y: line.y2}];
       points.forEach(p => {
         const d = dist(worldPos, p);
@@ -158,6 +179,39 @@ const App: React.FC = () => {
       });
     });
 
+    // 2. Snap to circle centers
+    circles.forEach(circle => {
+       if (excludeId && circle.id === excludeId) return;
+       const d = dist(worldPos, {x: circle.cx, y: circle.cy});
+       if (d < minD) {
+         minD = d;
+         closest = { x: circle.cx, y: circle.cy, type: 'center' };
+       }
+    });
+
+    // 3. Snap to Line Intersections
+    for (let i = 0; i < lines.length; i++) {
+        const l1 = lines[i];
+        if (excludeId && l1.id === excludeId) continue;
+        for (let j = i + 1; j < lines.length; j++) {
+            const l2 = lines[j];
+            if (excludeId && l2.id === excludeId) continue;
+
+            const int = getIntersection(l1, l2);
+            if (int) {
+                // Check if intersection is within segments (with small epsilon)
+                if (int.t >= -0.001 && int.t <= 1.001 && int.u >= -0.001 && int.u <= 1.001) {
+                     const p = {x: int.x, y: int.y};
+                     const d = dist(worldPos, p);
+                     if (d < minD) {
+                         minD = d;
+                         closest = { ...p, type: 'intersection' };
+                     }
+                }
+            }
+        }
+    }
+
     if (closest) return closest;
     
     return {
@@ -165,10 +219,32 @@ const App: React.FC = () => {
       y: Math.round(worldPos.y / GRID_SIZE) * GRID_SIZE,
       type: 'grid'
     };
-  }, [lines, scale]);
+  }, [lines, circles, scale]);
+
+  const handleManualZoom = (delta: number) => {
+    if (!svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
+    
+    const newScale = Math.min(Math.max(scale + delta, 0.1), 10);
+    
+    // Calculate world coordinate of the center
+    const worldX = (centerX - offset.x) / scale;
+    const worldY = (centerY - offset.y) / scale;
+
+    setScale(newScale);
+    // Adjust offset to keep the world point at the center
+    setOffset({
+      x: centerX - worldX * newScale,
+      y: centerY - worldY * newScale
+    });
+  };
 
   const handleWheel = (e: React.WheelEvent) => {
     if (!svgRef.current) return;
+    if (mode === 'move') return; // Disable zoom in move segment mode
+
     e.preventDefault();
     const zoomDelta = -e.deltaY * 0.001;
     const newScale = Math.min(Math.max(scale + zoomDelta, 0.1), 10);
@@ -190,6 +266,14 @@ const App: React.FC = () => {
   const getLineAtPos = (pos: Point) => {
     return lines.find(line => {
       return distToSegment(pos, {x: line.x1, y: line.y1}, {x: line.x2, y: line.y2}) < 10 / scale;
+    });
+  };
+
+  const getCircleAtPos = (pos: Point) => {
+    return circles.find(circle => {
+      // Hit test the rim of the circle
+      const d = dist(pos, {x: circle.cx, y: circle.cy});
+      return Math.abs(d - circle.r) < 10 / scale;
     });
   };
 
@@ -270,84 +354,200 @@ const App: React.FC = () => {
     }
   };
 
+  const performTrim = (targetLine: Line, clickPos: Point) => {
+    // 1. Find all intersections with other lines
+    const tValues: number[] = [0, 1];
+    
+    lines.forEach(other => {
+      if (other.id === targetLine.id) return;
+      
+      const intersection = getIntersection(targetLine, other);
+      if (intersection) {
+        tValues.push(intersection.t);
+      }
+    });
+    
+    // Sort and remove duplicates
+    tValues.sort((a, b) => a - b);
+    const uniqueT: number[] = [];
+    if(tValues.length > 0) uniqueT.push(tValues[0]);
+    for(let i=1; i<tValues.length; i++) {
+        if(tValues[i] - tValues[i-1] > 0.001) {
+            uniqueT.push(tValues[i]);
+        }
+    }
+
+    // 2. Determine where the click was (t parameter)
+    const dx = targetLine.x2 - targetLine.x1;
+    const dy = targetLine.y2 - targetLine.y1;
+    const len2 = dx * dx + dy * dy;
+    
+    let tClick = 0;
+    if (len2 > 0) {
+       tClick = ((clickPos.x - targetLine.x1) * dx + (clickPos.y - targetLine.y1) * dy) / len2;
+    }
+    tClick = Math.max(0, Math.min(1, tClick));
+
+    // 3. Find which segment [tStart, tEnd] contains tClick
+    let tStart = -1;
+    let tEnd = -1;
+    
+    for (let i = 0; i < uniqueT.length - 1; i++) {
+        if (tClick >= uniqueT[i] - 0.001 && tClick <= uniqueT[i+1] + 0.001) {
+            tStart = uniqueT[i];
+            tEnd = uniqueT[i+1];
+            break;
+        }
+    }
+    
+    if (tStart === -1) return;
+
+    // 4. Modify lines
+    saveToHistory();
+    
+    const newLines = lines.filter(l => l.id !== targetLine.id);
+    
+    // Segment before cut
+    if (tStart > 0.001) {
+       newLines.push({
+         ...targetLine,
+         id: Date.now() + Math.random(),
+         x2: targetLine.x1 + tStart * dx,
+         y2: targetLine.y1 + tStart * dy,
+         selected: false
+       });
+    }
+    
+    // Segment after cut
+    if (tEnd < 0.999) {
+       newLines.push({
+         ...targetLine,
+         id: Date.now() + 1 + Math.random(),
+         x1: targetLine.x1 + tEnd * dx,
+         y1: targetLine.y1 + tEnd * dy,
+         selected: false
+       });
+    }
+    
+    setLines(newLines);
+    setMessage("線段已修剪");
+  };
+
   // Interaction Logic (Pointer Events)
   const handlePointerDown = (e: React.PointerEvent) => {
-    // Prevent default touch actions (scrolling) managed by CSS touch-none, 
-    // but explicit prevention can help in some browsers
+    // Add pointer to cache
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    (e.target as Element).setPointerCapture(e.pointerId);
+
     if (e.pointerType === 'touch') {
-      // e.preventDefault(); // React synthetic event might not need this if touch-action is set
+      // e.preventDefault(); 
     }
     
     if (e.button === 2) return; 
 
-    // Pointer event has clientX/Y just like MouseEvent
     const worldPos = screenToWorld(e.clientX, e.clientY);
-    const currentPos = snapPos || worldPos;
+    // FIX: Always calculate the fresh snapped position on pointer down.
+    // relying on 'snapPos' state is incorrect for touch devices because there is no hover event to update it before 'down'.
+    const currentPos = getSnappedPos(worldPos);
+    setSnapPos(currentPos); // Visual feedback
 
-    if (e.button === 1 || mode === 'pan') {
+    // If more than 1 finger and touch move is NOT enabled, we just track but don't act yet.
+    // If touch move IS enabled, we will handle pinch in Move.
+    if (isTouchMoveEnabled && pointers.current.size > 1) {
+      setIsPanning(false);
+      return;
+    }
+
+    // Disable middle click pan in move segment mode
+    if ((e.button === 1 && mode !== 'move') || mode === 'pan') {
       setIsPanning(true);
       setLastMousePos({ x: e.clientX, y: e.clientY });
-      // Capture pointer to track outside window
-      (e.target as Element).setPointerCapture(e.pointerId);
       return;
     }
 
     if (mode === 'select' || mode === 'move') {
       const clickedLine = getLineAtPos(worldPos);
-      const clickedDim = (mode === 'select' && !clickedLine) ? getDimensionAtPos(worldPos) : null;
+      const clickedCircle = !clickedLine ? getCircleAtPos(worldPos) : null;
+      const clickedDim = (mode === 'select' && !clickedLine && !clickedCircle) ? getDimensionAtPos(worldPos) : null;
       
       if (clickedLine) {
         setDraggingLine(clickedLine);
         setDragStartPos(currentPos); 
         setHasMoved(false);
-        (e.target as Element).setPointerCapture(e.pointerId);
-
-        // Selection
+        
+        // Selection Logic
         if (mode === 'select') {
            setLines(lines.map(l => ({ ...l, selected: l.id === clickedLine.id })));
+           setCircles(circles.map(c => ({ ...c, selected: false })));
            setDims(dims.map(d => ({ ...d, selected: false })));
-        } else {
+        } else { // Move mode select
            if (!clickedLine.selected) {
              setLines(prev => prev.map(l => ({ ...l, selected: l.id === clickedLine.id })));
+             // Don't deselect others in move mode to allow moving groups
            }
         }
         
-        // Anchor Detection
-        if (mode === 'select') {
+        // Anchor Detection (Lines only) - Enabled for both Select and Move modes
+        let anchorFound = false;
+        if (mode === 'select' || mode === 'move') {
             const snapThreshold = 10 / scale;
             const d1 = dist(worldPos, {x: clickedLine.x1, y: clickedLine.y1});
             const d2 = dist(worldPos, {x: clickedLine.x2, y: clickedLine.y2});
             if (d1 < snapThreshold) {
               setDragAnchor('start');
               setMessage(`拖曳端點 (起點)`);
+              anchorFound = true;
             } else if (d2 < snapThreshold) {
               setDragAnchor('end');
               setMessage(`拖曳端點 (終點)`);
-            } else {
-              setDragAnchor(null);
-              setMessage(`移動線段`);
+              anchorFound = true;
             }
+        }
+
+        if (!anchorFound) {
+            setDragAnchor(null);
+            setMessage(mode === 'move' ? "精確移動" : "移動線段");
+        }
+
+      } else if (clickedCircle) {
+        setDraggingCircle(clickedCircle);
+        setDragStartPos(currentPos);
+        setHasMoved(false);
+        
+        if (mode === 'select') {
+           setLines(lines.map(l => ({ ...l, selected: false })));
+           setCircles(circles.map(c => ({ ...c, selected: c.id === clickedCircle.id })));
+           setDims(dims.map(d => ({ ...d, selected: false })));
+           setMessage(`移動圓形`);
         } else {
-           setDragAnchor(null);
-           setMessage(`精確移動: 拖曳至目標點`);
+            if (!clickedCircle.selected) {
+               setCircles(prev => prev.map(c => ({ ...c, selected: c.id === clickedCircle.id })));
+            }
+            setMessage(`精確移動`);
         }
 
       } else if (clickedDim && mode === 'select') {
         setLines(lines.map(l => ({ ...l, selected: false })));
+        setCircles(circles.map(c => ({ ...c, selected: false })));
         setDims(dims.map(d => ({ ...d, selected: d.id === clickedDim.id })));
         setMessage(`已選取標註`);
       } else {
+        // Clicked Empty Space
         if (mode === 'select') {
             setLines(lines.map(l => ({ ...l, selected: false })));
+            setCircles(circles.map(c => ({ ...c, selected: false })));
             setDims(dims.map(d => ({ ...d, selected: false })));
             setMessage("就緒");
         }
-        if (mode === 'move' && lines.some(l => l.selected)) {
-            setDraggingLine({ id: -1 } as Line); 
-            setDragStartPos(currentPos);
-            setHasMoved(false);
-            setDragAnchor(null);
-            (e.target as Element).setPointerCapture(e.pointerId);
+        if (mode === 'move') {
+            // Allow moving selection even if clicking empty space (relative move)
+            const hasSel = lines.some(l => l.selected) || circles.some(c => c.selected);
+            if (hasSel) {
+               setDraggingLine({ id: -1 } as Line); // Dummy
+               setDragStartPos(currentPos);
+               setHasMoved(false);
+               setDragAnchor(null);
+            }
         }
       }
     } else if (mode === 'draw_poly') {
@@ -369,7 +569,6 @@ const App: React.FC = () => {
         setMessage("線段已建立");
       }
     } else if (mode === 'draw_fixed_h' || mode === 'draw_fixed_v') {
-      // 2-step process: Click start, Move to choose dir, Click to confirm
       if (interactionPoints.length === 0) {
         setInteractionPoints([currentPos]);
         setMessage("請移動滑鼠選擇方向，再次點擊確認");
@@ -380,9 +579,7 @@ const App: React.FC = () => {
         let x2 = start.x;
         let y2 = start.y;
         
-        // Calculate final endpoint based on mouse direction relative to start
         if (mode === 'draw_fixed_h') {
-           // Use worldPos for direction check to be intuitive
            const dir = worldPos.x >= start.x ? 1 : -1;
            x2 = start.x + len * dir;
         } else {
@@ -416,6 +613,19 @@ const App: React.FC = () => {
         selected: false 
       }]);
       setMessage("角度線已建立");
+    } else if (mode === 'draw_circle') {
+      // Draw Circle by Diameter
+      saveToHistory();
+      const diameter = parseFloat(paramLength) || 0;
+      const radius = diameter / 2;
+      setCircles([...circles, {
+        id: Date.now(),
+        cx: currentPos.x,
+        cy: currentPos.y,
+        r: radius,
+        selected: false
+      }]);
+      setMessage("圓形已建立");
     } else if (mode === 'dim_dist') {
       if (interactionPoints.length < 2) {
         setInteractionPoints([...interactionPoints, currentPos]);
@@ -453,7 +663,6 @@ const App: React.FC = () => {
         const intersection = getLineIntersection(l1, l2);
         if (intersection) {
            saveToHistory();
-           
            const p1 = dist({x: l1.x1, y: l1.y1}, intersection) > dist({x: l1.x2, y: l1.y2}, intersection) 
               ? {x: l1.x1, y: l1.y1} : {x: l1.x2, y: l1.y2};
            const p2 = dist({x: l2.x1, y: l2.y1}, intersection) > dist({x: l2.x2, y: l2.y2}, intersection) 
@@ -462,8 +671,7 @@ const App: React.FC = () => {
            setDims([...dims, {
              id: Date.now(),
              type: 'angle',
-             p1, // corrected p1
-             p2, // corrected p2
+             p1, p2,
              offsetPos: currentPos,
              center: intersection
            }]);
@@ -482,10 +690,62 @@ const App: React.FC = () => {
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
+    // Update pointer position
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    // --- Multi-touch Logic (Only when enabled) ---
+    if (isTouchMoveEnabled && pointers.current.size === 2) {
+       if (mode === 'move') return; // Disable pinch zoom/pan in move segment mode
+
+       const points = Array.from(pointers.current.values()) as Point[];
+       const p1 = points[0];
+       const p2 = points[1];
+
+       if (!p1 || !p2) return;
+
+       const currentDist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+       const currentCenter = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+
+       if (prevPinchDist.current !== null && prevPinchCenter.current !== null) {
+          if (!svgRef.current) return;
+          const rect = svgRef.current.getBoundingClientRect();
+          
+          // Calculate Zoom Factor
+          const factor = currentDist / prevPinchDist.current;
+          const newScale = Math.min(Math.max(scale * factor, 0.1), 10);
+          
+          // Math to calculate new offset to keep the world point under the pinch center stationary
+          // World point under previous center:
+          const prevCenterRelX = prevPinchCenter.current.x - rect.left;
+          const prevCenterRelY = prevPinchCenter.current.y - rect.top;
+          
+          const worldX = (prevCenterRelX - offset.x) / scale;
+          const worldY = (prevCenterRelY - offset.y) / scale;
+          
+          // New offset so that worldX maps to currentCenter
+          const currentCenterRelX = currentCenter.x - rect.left;
+          const currentCenterRelY = currentCenter.y - rect.top;
+          
+          const newOffset = {
+             x: currentCenterRelX - worldX * newScale,
+             y: currentCenterRelY - worldY * newScale
+          };
+
+          setScale(newScale);
+          setOffset(newOffset);
+       }
+
+       prevPinchDist.current = currentDist;
+       prevPinchCenter.current = currentCenter;
+       return; // Stop other interactions when pinching
+    }
+
+    // Normal single pointer interaction
     const worldPos = screenToWorld(e.clientX, e.clientY);
     setMousePos(worldPos);
     
-    const currentSnap = getSnappedPos(worldPos, draggingLine?.id);
+    // Snap needs to exclude current dragging object to avoid self-snapping anomalies (mostly for endpoints)
+    const currentSnap = getSnappedPos(worldPos, draggingLine?.id || draggingCircle?.id);
     setSnapPos(currentSnap);
 
     if (isPanning) {
@@ -496,47 +756,75 @@ const App: React.FC = () => {
       setLastMousePos({ x: e.clientX, y: e.clientY });
     }
 
-    if (draggingLine && dragStartPos) {
+    if ((draggingLine || draggingCircle) && dragStartPos) {
       if (!hasMoved) {
         saveToHistory();
         setHasMoved(true);
       }
 
-      if (dragAnchor && mode === 'select') {
-        // Stretching endpoint (Select Mode Only)
-        setLines(prev => prev.map(l => {
-          if (l.id !== draggingLine.id) return l;
-          let newX1 = l.x1, newY1 = l.y1, newX2 = l.x2, newY2 = l.y2;
-          const targetX = currentSnap.x;
-          const targetY = currentSnap.y;
-          if (dragAnchor === 'start') {
-            newX1 = targetX; newY1 = targetY;
+      const dx = currentSnap.x - dragStartPos.x;
+      const dy = currentSnap.y - dragStartPos.y;
+
+      // Handle Line Dragging
+      if (draggingLine) {
+          if (dragAnchor && (mode === 'select' || mode === 'move')) {
+            // Stretching endpoint
+            setLines(prev => prev.map(l => {
+              if (l.id !== draggingLine.id) return l;
+              let newX1 = l.x1, newY1 = l.y1, newX2 = l.x2, newY2 = l.y2;
+              if (dragAnchor === 'start') {
+                newX1 = currentSnap.x; newY1 = currentSnap.y;
+              } else {
+                newX2 = currentSnap.x; newY2 = currentSnap.y;
+              }
+              return { ...l, x1: newX1, y1: newY1, x2: newX2, y2: newY2 };
+            }));
           } else {
-            newX2 = targetX; newY2 = targetY;
+            // Moving whole line
+            if (dx !== 0 || dy !== 0) {
+                setLines(prev => prev.map(l => 
+                  (l.selected || l.id === draggingLine.id) 
+                    ? { ...l, x1: l.x1 + dx, y1: l.y1 + dy, x2: l.x2 + dx, y2: l.y2 + dy } 
+                    : l
+                ));
+                // Move circles if selected
+                setCircles(prev => prev.map(c => 
+                   c.selected ? { ...c, cx: c.cx + dx, cy: c.cy + dy } : c
+                ));
+                setDragStartPos(currentSnap);
+            }
           }
-          return { ...l, x1: newX1, y1: newY1, x2: newX2, y2: newY2 };
-        }));
-      } else {
-        // Moving whole line
-        const dx = currentSnap.x - dragStartPos.x;
-        const dy = currentSnap.y - dragStartPos.y;
-        
-        if (dx !== 0 || dy !== 0) {
-            setLines(prev => prev.map(l => 
-              (l.selected || l.id === draggingLine.id) 
-                ? { ...l, x1: l.x1 + dx, y1: l.y1 + dy, x2: l.x2 + dx, y2: l.y2 + dy } 
-                : l
-            ));
-            setDragStartPos(currentSnap);
-        }
+      } 
+      // Handle Circle Dragging (always whole move)
+      else if (draggingCircle) {
+           if (dx !== 0 || dy !== 0) {
+               setCircles(prev => prev.map(c => 
+                  (c.selected || c.id === draggingCircle.id)
+                    ? { ...c, cx: c.cx + dx, cy: c.cy + dy }
+                    : c
+               ));
+               // Move lines if selected
+               setLines(prev => prev.map(l => 
+                  l.selected ? { ...l, x1: l.x1 + dx, y1: l.y1 + dy, x2: l.x2 + dx, y2: l.y2 + dy } : l
+               ));
+               setDragStartPos(currentSnap);
+           }
       }
     }
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
+    // Remove pointer
+    pointers.current.delete(e.pointerId);
+    if (pointers.current.size < 2) {
+       prevPinchDist.current = null;
+       prevPinchCenter.current = null;
+    }
+    
     (e.target as Element).releasePointerCapture(e.pointerId);
     setIsPanning(false);
     setDraggingLine(null);
+    setDraggingCircle(null);
     setDragAnchor(null);
     setHasMoved(false);
     if(mode === 'select' || mode === 'move') setMessage("就緒");
@@ -545,6 +833,7 @@ const App: React.FC = () => {
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
     setDraggingLine(null);
+    setDraggingCircle(null);
     setInteractionPoints([]);
     setSelectedLinesForTool([]);
     if ((mode === 'draw_poly' || mode === 'draw_fixed_h' || mode === 'draw_fixed_v') && interactionPoints.length > 0) {
@@ -556,58 +845,33 @@ const App: React.FC = () => {
     }
   };
 
-  const performTrim = (targetLine: Line, clickPos: Point) => {
-    saveToHistory();
-    let pts: {t: number, p: Point}[] = [
-      { t: 0, p: { x: targetLine.x1, y: targetLine.y1 } }, 
-      { t: 1, p: { x: targetLine.x2, y: targetLine.y2 } }
-    ];
-
-    lines.forEach(other => {
-      if (other.id === targetLine.id) return;
-      const res = getIntersection(targetLine, other);
-      if (res && res.t > 0.001 && res.t < 0.999 && res.u >= 0 && res.u <= 1) {
-        pts.push({ t: res.t, p: { x: res.x, y: res.y } });
-      }
-    });
-
-    pts.sort((a, b) => a.t - b.t);
-
-    const dx = targetLine.x2 - targetLine.x1;
-    const dy = targetLine.y2 - targetLine.y1;
-    const tClick = ((clickPos.x - targetLine.x1) * dx + (clickPos.y - targetLine.y1) * dy) / (dx * dx + dy * dy);
-    
-    const nextLines: Line[] = [];
-    for (let i = 0; i < pts.length - 1; i++) {
-      if (!(tClick >= pts[i].t && tClick <= pts[i + 1].t)) {
-        nextLines.push({ 
-          id: Date.now() + Math.random(), 
-          x1: pts[i].p.x, 
-          y1: pts[i].p.y, 
-          x2: pts[i + 1].p.x, 
-          y2: pts[i + 1].p.y,
-          selected: false 
-        });
-      }
-    }
-    setLines(lines.filter(l => l.id !== targetLine.id).concat(nextLines));
-    setMessage("線段已修剪");
-  };
-
   const handleToolChange = (newMode: ToolMode) => {
-    setMode(newMode);
-    setInteractionPoints([]);
-    setSelectedLinesForTool([]);
-    setMessage(`工具：${getToolName(newMode)}`);
+    // Disable wallpaper move when selecting any tool
+    setIsTouchMoveEnabled(false);
+
+    // If clicking the same tool again, deselect it (go back to select mode)
+    if (mode === newMode) {
+      setMode('select');
+      setInteractionPoints([]);
+      setSelectedLinesForTool([]);
+      setMessage("已切換至選取模式");
+    } else {
+      setMode(newMode);
+      setInteractionPoints([]);
+      setSelectedLinesForTool([]);
+      setMessage(`工具：${getToolName(newMode)}`);
+    }
   };
 
   const deleteSelected = () => {
     const linesChanged = lines.some(l => l.selected);
+    const circlesChanged = circles.some(c => c.selected);
     const dimsChanged = dims.some(d => d.selected);
     
-    if (linesChanged || dimsChanged) {
+    if (linesChanged || circlesChanged || dimsChanged) {
       saveToHistory();
       setLines(lines.filter(l => !l.selected));
+      setCircles(circles.filter(c => !c.selected));
       setDims(dims.filter(d => !d.selected));
       setMessage("已刪除選取物件");
     } else {
@@ -616,9 +880,10 @@ const App: React.FC = () => {
   };
 
   const clearCanvas = () => {
-    if(lines.length === 0 && dims.length === 0) return;
+    if(lines.length === 0 && circles.length === 0 && dims.length === 0) return;
     saveToHistory();
     setLines([]);
+    setCircles([]);
     setDims([]);
     setInteractionPoints([]);
     setSelectedLinesForTool([]);
@@ -680,7 +945,7 @@ const App: React.FC = () => {
 
           <div className="flex space-x-1 mr-4 border-r pr-4 border-slate-200">
              <ToolButton id="select" currentMode={mode} icon={MousePointer2} label="選取" onClick={handleToolChange} />
-             <ToolButton id="move" currentMode={mode} icon={Move} label="移動" onClick={handleToolChange} />
+             <ToolButton id="move" currentMode={mode} icon={Move} label="移動線段" onClick={handleToolChange} />
              <button 
                 onClick={deleteSelected}
                 className="p-2 flex flex-col items-center justify-center border rounded w-16 h-16 text-[10px] transition-all duration-200 bg-white hover:bg-rose-50 text-rose-600 border-slate-200 hover:border-rose-200 shadow-sm"
@@ -713,13 +978,36 @@ const App: React.FC = () => {
         {/* Right: Params & Zoom */}
         <div className="flex items-center space-x-4">
              <div className="flex items-center space-x-2">
+                
+                {/* Wallpaper Move Button */}
+                <button 
+                  onClick={() => {
+                    if (!isTouchMoveEnabled) {
+                      // Enabling wallpaper move, so disable move tool if active
+                      if (mode === 'move') {
+                        setMode('select');
+                        setMessage('已切換至選取模式');
+                      }
+                    }
+                    setIsTouchMoveEnabled(!isTouchMoveEnabled);
+                  }}
+                  className={`p-2 flex flex-col items-center justify-center border rounded w-16 h-16 text-[10px] transition-all duration-200 ${
+                    isTouchMoveEnabled 
+                      ? 'bg-indigo-600 text-white border-indigo-700 shadow-inner' 
+                      : 'bg-white hover:bg-slate-50 text-slate-500 border-slate-200 hover:border-slate-300 shadow-sm'
+                  }`}
+                >
+                  <Expand size={18} className="mb-1" />
+                  <span className="text-center leading-tight">桌布移動</span>
+                </button>
+
                 <div className="flex flex-col items-end">
-                  <label className="text-[9px] uppercase font-bold text-slate-400">長度</label>
+                  <label className="text-[9px] uppercase font-bold text-slate-400">長度/直徑</label>
                   <input 
                     type="number" 
                     value={paramLength} 
                     onChange={e => setParamLength(e.target.value)} 
-                    className="w-16 border border-slate-300 rounded text-sm px-2 h-7 focus:outline-none focus:border-indigo-500 text-right" 
+                    className="w-[4.5rem] border border-slate-300 rounded text-sm px-2 h-7 focus:outline-none focus:border-indigo-500 text-right" 
                   />
                 </div>
                 <div className="flex flex-col items-end">
@@ -733,9 +1021,23 @@ const App: React.FC = () => {
                 </div>
              </div>
              <div className="h-8 w-px bg-slate-200 mx-2"></div>
-             <span className="font-mono text-xs text-slate-500">
-               {Math.round(scale * 100)}%
-             </span>
+             <div className="flex items-center space-x-1">
+                <button 
+                   onClick={() => handleManualZoom(-0.1)}
+                   className="p-1 hover:bg-slate-100 rounded text-slate-600 active:bg-slate-200 transition-colors"
+                >
+                   <ZoomOut size={16} />
+                </button>
+                <span className="font-mono text-xs text-slate-500 w-12 text-center select-none">
+                  {Math.round(scale * 100)}%
+                </span>
+                <button 
+                   onClick={() => handleManualZoom(0.1)}
+                   className="p-1 hover:bg-slate-100 rounded text-slate-600 active:bg-slate-200 transition-colors"
+                >
+                   <ZoomIn size={16} />
+                </button>
+             </div>
         </div>
       </div>
 
@@ -748,6 +1050,7 @@ const App: React.FC = () => {
           <ToolButton id="draw_fixed_h" currentMode={mode} icon={Minus} label="水平線" onClick={handleToolChange} />
           <ToolButton id="draw_fixed_v" currentMode={mode} icon={MoveVertical} label="垂直線" onClick={handleToolChange} />
           <ToolButton id="draw_fixed_a" currentMode={mode} icon={ArrowUpRight} label="角度線" onClick={handleToolChange} />
+          <ToolButton id="draw_circle" currentMode={mode} icon={CircleIcon} label="畫圓" onClick={handleToolChange} />
           <div className="w-12 h-px bg-slate-200 my-1" />
           <ToolButton id="trim" currentMode={mode} icon={Scissors} label="修剪" onClick={handleToolChange} />
           <ToolButton id="extend" currentMode={mode} icon={Maximize} label="延伸" onClick={handleToolChange} />
@@ -762,16 +1065,21 @@ const App: React.FC = () => {
             onPointerMove={handlePointerMove} 
             onPointerUp={handlePointerUp}
             onPointerLeave={handlePointerUp}
+            onPointerCancel={handlePointerUp}
             onContextMenu={handleContextMenu}
           >
             <defs>
-              <pattern id="grid" width={GRID_SIZE * scale} height={GRID_SIZE * scale} patternUnits="userSpaceOnUse">
-                <circle cx={1 * scale} cy={1 * scale} r={1 * scale} fill="#94a3b8" opacity={0.4} />
+              <pattern id="grid" width={GRID_SIZE} height={GRID_SIZE} patternUnits="userSpaceOnUse">
+                <circle cx={1} cy={1} r={1} fill="#94a3b8" opacity={0.4} />
               </pattern>
             </defs>
-            <rect width="100%" height="100%" fill="url(#grid)" />
             
             <g transform={`translate(${offset.x}, ${offset.y}) scale(${scale})`}>
+              {/* Wallpaper Background */}
+              <rect x={0} y={0} width={WALLPAPER_SIZE} height={WALLPAPER_SIZE} fill="white" />
+              <rect x={0} y={0} width={WALLPAPER_SIZE} height={WALLPAPER_SIZE} fill="url(#grid)" />
+              <rect x={0} y={0} width={WALLPAPER_SIZE} height={WALLPAPER_SIZE} fill="none" stroke="#cbd5e1" strokeWidth={2/scale} />
+
               {/* Draw Lines */}
               {lines.map(line => (
                 <g 
@@ -800,6 +1108,35 @@ const App: React.FC = () => {
                     strokeWidth={12 / scale} 
                     className={`${mode === 'trim' ? 'cursor-alias hover:stroke-rose-500/20' : (mode === 'extend' ? 'cursor-alias hover:stroke-indigo-500/20' : 'cursor-pointer')}`}
                   />
+                </g>
+              ))}
+
+              {/* Draw Circles */}
+              {circles.map(circle => (
+                <g key={circle.id} className="group">
+                   <circle
+                     cx={circle.cx}
+                     cy={circle.cy}
+                     r={circle.r}
+                     stroke={circle.selected ? "#4f46e5" : "#0f172a"}
+                     strokeWidth={1.5 / scale}
+                     fill="transparent"
+                     className="transition-colors duration-100"
+                   />
+                   {/* Invisible Hit Area (Thicker Rim) */}
+                   <circle
+                     cx={circle.cx}
+                     cy={circle.cy}
+                     r={circle.r}
+                     stroke="transparent"
+                     strokeWidth={12 / scale}
+                     fill="transparent"
+                     className="cursor-pointer"
+                   />
+                   {/* Center Point Marker (Visual aid when selected or hovering) */}
+                   {(circle.selected || mode === 'draw_poly') && (
+                      <circle cx={circle.cx} cy={circle.cy} r={2/scale} fill="#f43f5e" opacity={0.5} />
+                   )}
                 </g>
               ))}
 
@@ -897,17 +1234,29 @@ const App: React.FC = () => {
               {selectedLinesForTool.length === 2 && mode === 'dim_angle' && (
                   <circle cx={getLineIntersection(selectedLinesForTool[0], selectedLinesForTool[1])?.x || 0} cy={getLineIntersection(selectedLinesForTool[0], selectedLinesForTool[1])?.y || 0} r={dist(getLineIntersection(selectedLinesForTool[0], selectedLinesForTool[1]) || {x:0,y:0}, mousePos)} stroke="#f43f5e" strokeWidth={1/scale} fill="none" opacity={0.3} strokeDasharray={`${4/scale},${2/scale}`} />
               )}
+              
+              {/* Circle Preview Cursor */}
+              {mode === 'draw_circle' && snapPos && (
+                 <circle cx={snapPos.x} cy={snapPos.y} r={(parseFloat(paramLength) || 0) / 2} stroke="#4f46e5" strokeWidth={1/scale} fill="none" opacity={0.5} strokeDasharray={`${4/scale},${2/scale}`} />
+              )}
 
               {/* Snap Marker */}
               {snapPos && (
                 <g transform={`translate(${snapPos.x}, ${snapPos.y})`}>
-                  <rect 
-                    x={-4 / scale} y={-4 / scale} 
-                    width={8 / scale} height={8 / scale} 
-                    fill="none" 
-                    stroke={snapPos.type === 'endpoint' ? "#f43f5e" : "#4f46e5"} 
-                    strokeWidth={2 / scale} 
-                  />
+                  {snapPos.type === 'intersection' ? (
+                     <g stroke="#f43f5e" strokeWidth={2/scale}>
+                        <line x1={-6/scale} y1={-6/scale} x2={6/scale} y2={6/scale} />
+                        <line x1={6/scale} y1={-6/scale} x2={-6/scale} y2={6/scale} />
+                     </g>
+                  ) : (
+                    <rect 
+                      x={-4 / scale} y={-4 / scale} 
+                      width={8 / scale} height={8 / scale} 
+                      fill="none" 
+                      stroke={snapPos.type === 'endpoint' || snapPos.type === 'center' ? "#f43f5e" : "#4f46e5"} 
+                      strokeWidth={2 / scale} 
+                    />
+                  )}
                 </g>
               )}
             </g>
