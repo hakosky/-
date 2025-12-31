@@ -48,7 +48,7 @@ const App: React.FC = () => {
   const [history, setHistory] = useState<HistoryState[]>([]);
   const [redoStack, setRedoStack] = useState<HistoryState[]>([]);
 
-  // Viewport State (Default scale set to 0.4 for 1000 unit baseline)
+  // Viewport State (Default scale set to 0.4)
   const [scale, setScale] = useState(0.4);
   const [offset, setOffset] = useState<Point>({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
@@ -1154,4 +1154,181 @@ const App: React.FC = () => {
                 >
                   <line 
                     x1={line.x1} y1={line.y1} 
-                    x2={line.
+                    x2={line.x2} y2={line.y2} 
+                    stroke={selectedLinesForTool.find(l => l.id === line.id) ? "#f43f5e" : (line.selected ? "#4f46e5" : "#0f172a")} 
+                    strokeWidth={1.5 / scale} 
+                    strokeLinecap="round" 
+                    className="transition-colors duration-100"
+                  />
+                  {/* Invisible Hit Area (Thicker) */}
+                  <line 
+                    x1={line.x1} y1={line.y1} 
+                    x2={line.x2} y2={line.y2} 
+                    stroke="transparent" 
+                    strokeWidth={12 / scale} 
+                    className={`${mode === 'trim' ? 'cursor-alias hover:stroke-rose-500/20' : (mode === 'extend' ? 'cursor-alias hover:stroke-indigo-500/20' : 'cursor-pointer')}`}
+                  />
+                </g>
+              ))}
+
+              {/* Draw Circles */}
+              {circles.map(circle => (
+                <g key={circle.id} className="group">
+                   <circle
+                     cx={circle.cx}
+                     cy={circle.cy}
+                     r={circle.r}
+                     stroke={circle.selected ? "#4f46e5" : "#0f172a"}
+                     strokeWidth={1.5 / scale}
+                     fill="transparent"
+                     className="transition-colors duration-100"
+                   />
+                   {/* Invisible Hit Area (Thicker Rim) */}
+                   <circle
+                     cx={circle.cx}
+                     cy={circle.cy}
+                     r={circle.r}
+                     stroke="transparent"
+                     strokeWidth={12 / scale}
+                     fill="transparent"
+                     className="cursor-pointer"
+                   />
+                   {/* Center Point Marker (Visual aid when selected or hovering) */}
+                   {(circle.selected || mode === 'draw_poly') && (
+                      <circle cx={circle.cx} cy={circle.cy} r={2/scale} fill="#f43f5e" opacity={0.5} />
+                   )}
+                </g>
+              ))}
+
+              {/* Draw Dimensions */}
+              {dims.map(d => {
+                if (d.type === 'angle' && d.center) {
+                    const radius = dist(d.center, d.offsetPos);
+                    const degText = getAngleDisplay(d);
+                    const isSel = d.selected;
+                    const strokeColor = isSel ? "#4f46e5" : "#f43f5e";
+                    
+                    return (
+                        <g key={d.id} className="pointer-events-none select-none">
+                            <circle cx={d.center.x} cy={d.center.y} r={radius} stroke={strokeColor} strokeWidth={1/scale} fill="none" opacity={0.3} strokeDasharray={`${4/scale},${2/scale}`} />
+                             <line x1={d.center.x} y1={d.center.y} x2={d.offsetPos.x} y2={d.offsetPos.y} stroke={strokeColor} strokeWidth={0.5/scale} strokeDasharray={`${4/scale},${2/scale}`} />
+                            <text 
+                                x={d.offsetPos.x} 
+                                y={d.offsetPos.y} 
+                                fontSize={12/scale} 
+                                fill={strokeColor} 
+                                textAnchor="middle" 
+                                dominantBaseline="middle"
+                                className="font-mono font-bold"
+                            >
+                                {degText}
+                            </text>
+                        </g>
+                    )
+                }
+
+                // Dist dim
+                const angle = Math.atan2(d.p2.y - d.p1.y, d.p2.x - d.p1.x);
+                const l = dist(d.p1, d.p2);
+                const ux = (d.p2.x - d.p1.x) / l;
+                const uy = (d.p2.y - d.p1.y) / l;
+                const vx = -uy;
+                const vy = ux;
+                const h = (d.offsetPos.x - d.p1.x) * vx + (d.offsetPos.y - d.p1.y) * vy; 
+                
+                const b1x = d.p1.x + vx * h;
+                const b1y = d.p1.y + vy * h;
+                const b2x = d.p2.x + vx * h;
+                const b2y = d.p2.y + vy * h;
+
+                let textAngle = angle * 180 / Math.PI;
+                if (textAngle > 90) textAngle -= 180;
+                if (textAngle < -90) textAngle += 180;
+
+                const isSel = d.selected;
+                const strokeColor = isSel ? "#4f46e5" : "#f43f5e";
+                const helperColor = isSel ? "#818cf8" : "#94a3b8";
+
+                return (
+                  <g key={d.id} className="pointer-events-none select-none">
+                    <line x1={d.p1.x} y1={d.p1.y} x2={b1x} y2={b1y} stroke={helperColor} strokeWidth={0.5 / scale} strokeDasharray={`${4/scale},${2/scale}`} />
+                    <line x1={d.p2.x} y1={d.p2.y} x2={b2x} y2={b2y} stroke={helperColor} strokeWidth={0.5 / scale} strokeDasharray={`${4/scale},${2/scale}`} />
+                    <line x1={b1x} y1={b1y} x2={b2x} y2={b2y} stroke={strokeColor} strokeWidth={1 / scale} />
+                    <text 
+                      x={(b1x + b2x) / 2} 
+                      y={(b1y + b2y) / 2} 
+                      fontSize={12 / scale} 
+                      fill={strokeColor} 
+                      textAnchor="middle" 
+                      dominantBaseline="middle"
+                      transform={`rotate(${textAngle}, ${(b1x + b2x) / 2}, ${(b1y + b2y) / 2}) translate(0, ${-8/scale})`}
+                      className="font-mono font-bold"
+                    >
+                      {Math.round(l)}
+                    </text>
+                  </g>
+                );
+              })}
+
+              {/* Interaction Preview */}
+              {interactionPoints.length > 0 && previewEnd && (
+                <line 
+                  x1={interactionPoints[0].x} y1={interactionPoints[0].y} 
+                  x2={previewEnd.x} y2={previewEnd.y} 
+                  stroke="#4f46e5" 
+                  strokeWidth={1.5 / scale} 
+                  strokeDasharray={`${6/scale},${3/scale}`} 
+                  opacity={0.7}
+                />
+              )}
+              {interactionPoints.length === 2 && mode === 'dim_dist' && (
+                <line 
+                  x1={interactionPoints[0].x} y1={interactionPoints[0].y} 
+                  x2={interactionPoints[1].x} y2={interactionPoints[1].y} 
+                  stroke="#f43f5e" 
+                  strokeWidth={1.5 / scale} 
+                  strokeDasharray={`${6/scale},${3/scale}`} 
+                  opacity={0.5} 
+                />
+              )}
+              {selectedLinesForTool.length === 2 && mode === 'dim_angle' && (
+                  <circle cx={getLineIntersection(selectedLinesForTool[0], selectedLinesForTool[1])?.x || 0} cy={getLineIntersection(selectedLinesForTool[0], selectedLinesForTool[1])?.y || 0} r={dist(getLineIntersection(selectedLinesForTool[0], selectedLinesForTool[1]) || {x:0,y:0}, mousePos)} stroke="#f43f5e" strokeWidth={1/scale} fill="none" opacity={0.3} strokeDasharray={`${4/scale},${2/scale}`} />
+              )}
+              
+              {/* Circle Preview Cursor */}
+              {mode === 'draw_circle' && snapPos && (
+                 <circle cx={snapPos.x} cy={snapPos.y} r={(parseFloat(paramLength) || 0) / 2} stroke="#4f46e5" strokeWidth={1/scale} fill="none" opacity={0.5} strokeDasharray={`${4/scale},${2/scale}`} />
+              )}
+
+              {/* Snap Marker */}
+              {snapPos && (
+                <g transform={`translate(${snapPos.x}, ${snapPos.y})`}>
+                  {snapPos.type === 'intersection' ? (
+                     <g stroke="#f43f5e" strokeWidth={2/scale}>
+                        <line x1={-6/scale} y1={-6/scale} x2={6/scale} y2={6/scale} />
+                        <line x1={6/scale} y1={-6/scale} x2={-6/scale} y2={6/scale} />
+                     </g>
+                  ) : (
+                    <rect 
+                      x={-4 / scale} y={-4 / scale} 
+                      width={8 / scale} height={8 / scale} 
+                      fill="none" 
+                      stroke={snapPos.type === 'endpoint' || snapPos.type === 'center' ? "#f43f5e" : "#4f46e5"} 
+                      strokeWidth={2 / scale} 
+                    />
+                  )}
+                </g>
+              )}
+            </g>
+          </svg>
+          
+          <div className="absolute bottom-4 left-6 pointer-events-none opacity-50 text-[10px] text-slate-500">
+             <p>左鍵：操作 | 右鍵/ESC：取消/停止 | 中鍵：平移 | 滾輪：縮放</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default App;
