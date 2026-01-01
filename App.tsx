@@ -107,6 +107,8 @@ const App: React.FC = () => {
   const [cloudMode, setCloudMode] = useState<'save' | 'load'>('save');
   const [cloudFiles, setCloudFiles] = useState<CloudFile[]>([]);
   const [cloudFileName, setCloudFileName] = useState("");
+  // New state to track the currently loaded/saved file name
+  const [currentFileName, setCurrentFileName] = useState<string>(""); 
   const [supabaseKey, setSupabaseKey] = useState<string>(() => localStorage.getItem('cad_supabase_key') || '');
   const [isLoadingCloud, setIsLoadingCloud] = useState(false);
   
@@ -201,6 +203,7 @@ const App: React.FC = () => {
           setSelectedLinesForTool([]);
           setDraggingLine(null);
           setDraggingCircle(null);
+          // Note: Local files don't automatically set currentFileName for cloud saving to avoid accidental overwrites of unrelated cloud files
           setMessage("檔案讀取成功");
         } else {
           setMessage("錯誤：檔案格式不符");
@@ -248,9 +251,15 @@ const App: React.FC = () => {
   const handleCloudSaveClick = () => {
     setCloudMode('save');
     setShowCloudModal(true);
-    // Suggest a default name
-    const date = new Date();
-    setCloudFileName(`Drawing_${date.getFullYear()}${(date.getMonth()+1).toString().padStart(2,'0')}${date.getDate()}`);
+    
+    // Logic: If we have a currentFileName (loaded from cloud or previously saved), use it.
+    // Otherwise, generate a default date-based name.
+    if (currentFileName) {
+        setCloudFileName(currentFileName);
+    } else {
+        const date = new Date();
+        setCloudFileName(`Drawing_${date.getFullYear()}${(date.getMonth()+1).toString().padStart(2,'0')}${date.getDate()}`);
+    }
   };
 
   const handleCloudLoadClick = () => {
@@ -296,6 +305,7 @@ const App: React.FC = () => {
         }
     } else {
         setMessage("雲端儲存成功");
+        setCurrentFileName(cloudFileName); // Update the current file name to match what we just saved
         setShowCloudModal(false);
     }
   };
@@ -311,6 +321,7 @@ const App: React.FC = () => {
           setDraggingLine(null);
           setDraggingCircle(null);
           setMessage(`已讀取: ${file.name}`);
+          setCurrentFileName(file.name); // Store the name of the loaded file
           setShowCloudModal(false);
      } else {
          alert("檔案格式損毀");
@@ -1068,6 +1079,7 @@ const App: React.FC = () => {
     setInteractionPoints([]);
     setSelectedLinesForTool([]);
     setMode('select');
+    setCurrentFileName(''); // Clear the current file name so new drawings don't overwrite old ones by default
     setMessage("畫布已清空");
   };
 
