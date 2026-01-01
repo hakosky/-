@@ -1025,6 +1025,12 @@ const App: React.FC = () => {
 
   const handleToolChange = (newMode: ToolMode) => {
     setIsTouchMoveEnabled(false);
+
+    // Clear any existing selection when switching tools
+    setLines(prev => prev.map(l => ({ ...l, selected: false })));
+    setCircles(prev => prev.map(c => ({ ...c, selected: false })));
+    setDims(prev => prev.map(d => ({ ...d, selected: false })));
+
     if (mode === newMode) {
       setMode('select');
       setInteractionPoints([]);
