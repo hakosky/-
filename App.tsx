@@ -4,14 +4,19 @@ import {
   Scissors, ArrowUpRight, Ruler, Eraser, Hand,
   Trash2, RotateCw, Undo2, Redo2, Maximize, Move,
   Circle as CircleIcon, ZoomIn, ZoomOut,
-  Expand // Icon for Wallpaper Move
+  Expand, 
+  Save, FolderOpen,
+  CloudUpload, CloudDownload, X, FileText, Check, Settings, Loader2
 } from 'lucide-react';
+import { createClient } from '@supabase/supabase-js';
 import { ToolButton } from './components/ToolButton';
 import { dist, getIntersection, getLineIntersection, distToSegment } from './utils';
 import { GRID_SIZE, SNAP_RADIUS } from './constants';
 import { Line, Circle, Point, Dimension, SnapPoint, ToolMode } from './types';
 
 const WALLPAPER_SIZE = 5000;
+// Project ID derived from user screenshot
+const SUPABASE_PROJECT_URL = 'https://nwzxugpdrnthiuvwilxv.supabase.co';
 
 const getToolName = (mode: ToolMode): string => {
   const names: Record<ToolMode, string> = {
@@ -37,6 +42,19 @@ interface HistoryState {
   dims: Dimension[];
 }
 
+interface SaveData {
+  version: number;
+  timestamp: number;
+  data: HistoryState;
+}
+
+interface CloudFile {
+  id: number;
+  name: string;
+  updated_at: string;
+  data: SaveData;
+}
+
 const App: React.FC = () => {
   const [lines, setLines] = useState<Line[]>([]);
   const [circles, setCircles] = useState<Circle[]>([]);
@@ -48,7 +66,7 @@ const App: React.FC = () => {
   const [history, setHistory] = useState<HistoryState[]>([]);
   const [redoStack, setRedoStack] = useState<HistoryState[]>([]);
 
-  // Viewport State (Default scale set to 0.4)
+  // Viewport State
   const [scale, setScale] = useState(0.4);
   const [offset, setOffset] = useState<Point>({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
@@ -63,27 +81,51 @@ const App: React.FC = () => {
   // Dragging State
   const [draggingLine, setDraggingLine] = useState<Line | null>(null);
   const [draggingCircle, setDraggingCircle] = useState<Circle | null>(null);
-  
-  // To fix drift, we store the original object state at the start of the drag
   const [dragOriginalLine, setDragOriginalLine] = useState<Line | null>(null);
   const [dragOriginalCircle, setDragOriginalCircle] = useState<Circle | null>(null);
-  
   const [dragStartPos, setDragStartPos] = useState<Point | null>(null);
   const [dragAnchor, setDragAnchor] = useState<'start' | 'end' | null>(null);
   const [hasMoved, setHasMoved] = useState(false);
 
-  // Multi-touch & Settings State
-  // FIX: Store pointer type to distinguish between 'touch' (finger) and 'pen' (stylus)
+  // Multi-touch
   const pointers = useRef<Map<number, { x: number; y: number; type: string }>>(new Map());
   const prevPinchDist = useRef<number | null>(null);
   const prevPinchCenter = useRef<Point | null>(null);
   const [isTouchMoveEnabled, setIsTouchMoveEnabled] = useState(false);
 
-  // Parameters (Default set to 1000)
+  // File Input Ref
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Parameters
   const [paramLength, setParamLength] = useState<string>("1000");
   const [paramAngle, setParamAngle] = useState<string>("45");
   
   const svgRef = useRef<SVGSVGElement>(null);
+
+  // --- Cloud / Supabase State ---
+  const [showCloudModal, setShowCloudModal] = useState(false);
+  const [cloudMode, setCloudMode] = useState<'save' | 'load'>('save');
+  const [cloudFiles, setCloudFiles] = useState<CloudFile[]>([]);
+  const [cloudFileName, setCloudFileName] = useState("");
+  const [supabaseKey, setSupabaseKey] = useState<string>(() => localStorage.getItem('cad_supabase_key') || '');
+  const [isLoadingCloud, setIsLoadingCloud] = useState(false);
+  
+  // Initialize Supabase Client dynamically
+  const getSupabase = () => {
+    if (!supabaseKey) return null;
+    return createClient(SUPABASE_PROJECT_URL, supabaseKey);
+  };
+
+  useEffect(() => {
+    if (supabaseKey) {
+      localStorage.setItem('cad_supabase_key', supabaseKey);
+    }
+  }, [supabaseKey]);
+
+  const clearSupabaseKey = () => {
+    setSupabaseKey('');
+    localStorage.removeItem('cad_supabase_key');
+  };
 
   // --- History Management ---
   const saveToHistory = useCallback(() => {
@@ -113,9 +155,174 @@ const App: React.FC = () => {
     setMessage("已重做");
   }, [redoStack, lines, circles, dims]);
 
+  // --- Local Save / Load ---
+  const handleSave = () => {
+    const saveData: SaveData = {
+      version: 1,
+      timestamp: Date.now(),
+      data: { lines, circles, dims }
+    };
+    const blob = new Blob([JSON.stringify(saveData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const date = new Date();
+    const dateStr = `${date.getFullYear()}${(date.getMonth()+1).toString().padStart(2,'0')}${date.getDate().toString().padStart(2,'0')}`;
+    const timeStr = `${date.getHours().toString().padStart(2,'0')}${date.getMinutes().toString().padStart(2,'0')}`;
+    link.href = url;
+    link.download = `drawing_${dateStr}_${timeStr}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    setMessage("檔案已下載");
+  };
+
+  const handleLoadClick = () => {
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const jsonContent = event.target?.result as string;
+        const parsed: SaveData = JSON.parse(jsonContent);
+        if (parsed.data && Array.isArray(parsed.data.lines)) {
+          saveToHistory();
+          setLines(parsed.data.lines);
+          setCircles(parsed.data.circles || []);
+          setDims(parsed.data.dims || []);
+          setInteractionPoints([]);
+          setSelectedLinesForTool([]);
+          setDraggingLine(null);
+          setDraggingCircle(null);
+          setMessage("檔案讀取成功");
+        } else {
+          setMessage("錯誤：檔案格式不符");
+        }
+      } catch (err) {
+        console.error(err);
+        setMessage("錯誤：無法解析檔案");
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  // --- Cloud Logic ---
+
+  const fetchCloudFiles = useCallback(async () => {
+    const supabase = getSupabase();
+    if (!supabase) return;
+    setIsLoadingCloud(true);
+    const { data, error } = await supabase
+      .from('drawings')
+      .select('id, name, updated_at, data')
+      .order('updated_at', { ascending: false });
+    
+    if (error) {
+      console.error('Cloud load error:', error);
+      if (error.message && (error.message.includes("Invalid API key") || error.code === 'PGRST301')) {
+         alert("API Key 無效或過期。請確認您輸入的是 Supabase 'anon' public key。\n已清除錯誤的 Key，請重新輸入。");
+         clearSupabaseKey();
+      } else {
+         setMessage("雲端讀取失敗: " + error.message);
+      }
+    } else {
+      setCloudFiles(data as CloudFile[]);
+    }
+    setIsLoadingCloud(false);
+  }, [supabaseKey]); // Depend on key change
+
+  // Auto-refresh file list when key is provided or mode changes to load
+  useEffect(() => {
+    if (showCloudModal && cloudMode === 'load' && supabaseKey) {
+      fetchCloudFiles();
+    }
+  }, [showCloudModal, cloudMode, supabaseKey, fetchCloudFiles]);
+
+  const handleCloudSaveClick = () => {
+    setCloudMode('save');
+    setShowCloudModal(true);
+    // Suggest a default name
+    const date = new Date();
+    setCloudFileName(`Drawing_${date.getFullYear()}${(date.getMonth()+1).toString().padStart(2,'0')}${date.getDate()}`);
+  };
+
+  const handleCloudLoadClick = () => {
+    setCloudMode('load');
+    setShowCloudModal(true);
+  };
+
+  const performCloudSave = async () => {
+    const supabase = getSupabase();
+    if (!supabase) {
+        alert("請先輸入 Supabase Anon Key");
+        return;
+    }
+    if (!cloudFileName.trim()) {
+        alert("請輸入檔案名稱");
+        return;
+    }
+
+    setIsLoadingCloud(true);
+    const saveData: SaveData = {
+      version: 1,
+      timestamp: Date.now(),
+      data: { lines, circles, dims }
+    };
+
+    const { error } = await supabase
+        .from('drawings')
+        .upsert({ 
+            name: cloudFileName, 
+            data: saveData,
+            updated_at: new Date().toISOString()
+        }, { onConflict: 'name' });
+
+    setIsLoadingCloud(false);
+
+    if (error) {
+        console.error("Upload error", error);
+        if (error.message && error.message.includes("Invalid API key")) {
+             alert("API Key 無效。請確認您輸入的是 Supabase 'anon' public key。\n(通常以 eyJ 開頭的長字串)\n\n系統已清除錯誤的 Key，請重新輸入。");
+             clearSupabaseKey();
+        } else {
+             alert("上傳失敗: " + error.message + "\n(請確認是否已關閉 RLS)");
+        }
+    } else {
+        setMessage("雲端儲存成功");
+        setShowCloudModal(false);
+    }
+  };
+
+  const performCloudLoad = (file: CloudFile) => {
+     if (file.data && Array.isArray(file.data.data.lines)) {
+          saveToHistory();
+          setLines(file.data.data.lines);
+          setCircles(file.data.data.circles || []);
+          setDims(file.data.data.dims || []);
+          setInteractionPoints([]);
+          setSelectedLinesForTool([]);
+          setDraggingLine(null);
+          setDraggingCircle(null);
+          setMessage(`已讀取: ${file.name}`);
+          setShowCloudModal(false);
+     } else {
+         alert("檔案格式損毀");
+     }
+  };
+
   // Global Key Handlers
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // If modal is open, don't trigger shortcuts
+      if (showCloudModal) return;
+
       if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
         if (e.shiftKey) redo();
         else undo();
@@ -123,6 +330,16 @@ const App: React.FC = () => {
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'y') {
         redo();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+        e.preventDefault();
+        handleSave();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === 'o') {
+        e.preventDefault();
+        handleLoadClick();
         return;
       }
 
@@ -158,7 +375,7 @@ const App: React.FC = () => {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [mode, interactionPoints, selectedLinesForTool, draggingLine, draggingCircle, history, redoStack, undo, redo, lines, circles, dims, saveToHistory]);
+  }, [mode, interactionPoints, selectedLinesForTool, draggingLine, draggingCircle, history, redoStack, undo, redo, lines, circles, dims, saveToHistory, showCloudModal]);
 
   // Coordinate System
   const screenToWorld = useCallback((clientX: number, clientY: number): Point => {
@@ -174,7 +391,6 @@ const App: React.FC = () => {
     let closest: SnapPoint | null = null;
     let minD = SNAP_RADIUS / scale;
 
-    // 1. Snap to line endpoints
     lines.forEach(line => {
       if (excludeId && line.id === excludeId) return; 
       const points: Point[] = [{x: line.x1, y: line.y1}, {x: line.x2, y: line.y2}];
@@ -187,7 +403,6 @@ const App: React.FC = () => {
       });
     });
 
-    // 2. Snap to circle centers
     circles.forEach(circle => {
        if (excludeId && circle.id === excludeId) return;
        const d = dist(worldPos, {x: circle.cx, y: circle.cy});
@@ -197,7 +412,6 @@ const App: React.FC = () => {
        }
     });
 
-    // 3. Snap to Line Intersections
     for (let i = 0; i < lines.length; i++) {
         const l1 = lines[i];
         if (excludeId && l1.id === excludeId) continue;
@@ -207,7 +421,6 @@ const App: React.FC = () => {
 
             const int = getIntersection(l1, l2);
             if (int) {
-                // Check if intersection is within segments (with small epsilon)
                 if (int.t >= -0.001 && int.t <= 1.001 && int.u >= -0.001 && int.u <= 1.001) {
                      const p = {x: int.x, y: int.y};
                      const d = dist(worldPos, p);
@@ -236,13 +449,10 @@ const App: React.FC = () => {
     const centerY = rect.height / 2;
     
     const newScale = Math.min(Math.max(scale + delta, 0.1), 10);
-    
-    // Calculate world coordinate of the center
     const worldX = (centerX - offset.x) / scale;
     const worldY = (centerY - offset.y) / scale;
 
     setScale(newScale);
-    // Adjust offset to keep the world point at the center
     setOffset({
       x: centerX - worldX * newScale,
       y: centerY - worldY * newScale
@@ -251,7 +461,7 @@ const App: React.FC = () => {
 
   const handleWheel = (e: React.WheelEvent) => {
     if (!svgRef.current) return;
-    if (mode === 'move') return; // Disable zoom in move segment mode
+    if (mode === 'move') return;
 
     e.preventDefault();
     const zoomDelta = -e.deltaY * 0.001;
@@ -279,7 +489,6 @@ const App: React.FC = () => {
 
   const getCircleAtPos = (pos: Point) => {
     return circles.find(circle => {
-      // Hit test the rim of the circle
       const d = dist(pos, {x: circle.cx, y: circle.cy});
       return Math.abs(d - circle.r) < 10 / scale;
     });
@@ -288,8 +497,8 @@ const App: React.FC = () => {
   const getDimensionAtPos = (pos: Point) => {
     return dims.find(d => {
       if (d.type === 'dist') {
-        const angle = Math.atan2(d.p2.y - d.p1.y, d.p2.x - d.p1.x);
         const l = dist(d.p1, d.p2);
+        if(l === 0) return false;
         const ux = (d.p2.x - d.p1.x) / l;
         const uy = (d.p2.y - d.p1.y) / l;
         const vx = -uy;
@@ -363,7 +572,6 @@ const App: React.FC = () => {
   };
 
   const performTrim = (targetLine: Line, clickPos: Point) => {
-    // 1. Find all intersections with other lines
     const tValues: number[] = [0, 1];
     
     lines.forEach(other => {
@@ -375,7 +583,6 @@ const App: React.FC = () => {
       }
     });
     
-    // Sort and remove duplicates
     tValues.sort((a, b) => a - b);
     const uniqueT: number[] = [];
     if(tValues.length > 0) uniqueT.push(tValues[0]);
@@ -385,7 +592,6 @@ const App: React.FC = () => {
         }
     }
 
-    // 2. Determine where the click was (t parameter)
     const dx = targetLine.x2 - targetLine.x1;
     const dy = targetLine.y2 - targetLine.y1;
     const len2 = dx * dx + dy * dy;
@@ -396,7 +602,6 @@ const App: React.FC = () => {
     }
     tClick = Math.max(0, Math.min(1, tClick));
 
-    // 3. Find which segment [tStart, tEnd] contains tClick
     let tStart = -1;
     let tEnd = -1;
     
@@ -410,12 +615,9 @@ const App: React.FC = () => {
     
     if (tStart === -1) return;
 
-    // 4. Modify lines
     saveToHistory();
-    
     const newLines = lines.filter(l => l.id !== targetLine.id);
     
-    // Segment before cut
     if (tStart > 0.001) {
        newLines.push({
          ...targetLine,
@@ -426,7 +628,6 @@ const App: React.FC = () => {
        });
     }
     
-    // Segment after cut
     if (tEnd < 0.999) {
        newLines.push({
          ...targetLine,
@@ -441,32 +642,21 @@ const App: React.FC = () => {
     setMessage("線段已修剪");
   };
 
-  // Interaction Logic (Pointer Events)
   const handlePointerDown = (e: React.PointerEvent) => {
-    // Add pointer to cache
-    // FIX: Store pointer type (pen/touch/mouse) to handle palm rejection in multi-touch
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
     (e.target as Element).setPointerCapture(e.pointerId);
 
-    if (e.pointerType === 'touch') {
-      // e.preventDefault(); 
-    }
-    
     if (e.button === 2) return; 
 
     const worldPos = screenToWorld(e.clientX, e.clientY);
-    // FIX: Always calculate the fresh snapped position on pointer down.
     const currentPos = getSnappedPos(worldPos);
-    setSnapPos(currentPos); // Visual feedback
+    setSnapPos(currentPos);
 
-    // If more than 1 finger and touch move is NOT enabled, we just track but don't act yet.
-    // If touch move IS enabled, we will handle pinch in Move.
     if (isTouchMoveEnabled && pointers.current.size > 1) {
       setIsPanning(false);
       return;
     }
 
-    // Disable middle click pan in move segment mode
     if ((e.button === 1 && mode !== 'move') || mode === 'pan') {
       setIsPanning(true);
       setLastMousePos({ x: e.clientX, y: e.clientY });
@@ -480,24 +670,20 @@ const App: React.FC = () => {
       
       if (clickedLine) {
         setDraggingLine(clickedLine);
-        // Save initial state for drift-free dragging
         setDragStartPos(currentPos); 
         setDragOriginalLine({ ...clickedLine });
         setHasMoved(false);
         
-        // Selection Logic
         if (mode === 'select') {
            setLines(lines.map(l => ({ ...l, selected: l.id === clickedLine.id })));
            setCircles(circles.map(c => ({ ...c, selected: false })));
            setDims(dims.map(d => ({ ...d, selected: false })));
-        } else { // Move mode select
+        } else {
            if (!clickedLine.selected) {
              setLines(prev => prev.map(l => ({ ...l, selected: l.id === clickedLine.id })));
-             // Don't deselect others in move mode to allow moving groups
            }
         }
         
-        // Anchor Detection (Lines only) - Enabled for both Select and Move modes
         let anchorFound = false;
         if (mode === 'select' || mode === 'move') {
             const snapThreshold = 10 / scale;
@@ -521,7 +707,6 @@ const App: React.FC = () => {
 
       } else if (clickedCircle) {
         setDraggingCircle(clickedCircle);
-        // Save initial state
         setDragStartPos(currentPos);
         setDragOriginalCircle({ ...clickedCircle });
         setHasMoved(false);
@@ -544,7 +729,6 @@ const App: React.FC = () => {
         setDims(dims.map(d => ({ ...d, selected: d.id === clickedDim.id })));
         setMessage(`已選取標註`);
       } else {
-        // Clicked Empty Space
         if (mode === 'select') {
             setLines(lines.map(l => ({ ...l, selected: false })));
             setCircles(circles.map(c => ({ ...c, selected: false })));
@@ -552,12 +736,10 @@ const App: React.FC = () => {
             setMessage("就緒");
         }
         if (mode === 'move') {
-            // Allow moving selection even if clicking empty space (relative move)
             const hasSel = lines.some(l => l.selected) || circles.some(c => c.selected);
             if (hasSel) {
-               setDraggingLine({ id: -1 } as Line); // Dummy
+               setDraggingLine({ id: -1 } as Line);
                setDragStartPos(currentPos);
-               // For group move, we can just use relative delta, snapshots are harder for groups but the relative delta on pointerMove usually works OK for groups if we use absolute start calculation
                setHasMoved(false);
                setDragAnchor(null);
             }
@@ -627,7 +809,6 @@ const App: React.FC = () => {
       }]);
       setMessage("角度線已建立");
     } else if (mode === 'draw_circle') {
-      // Draw Circle by Diameter
       saveToHistory();
       const diameter = parseFloat(paramLength) || 0;
       const radius = diameter / 2;
@@ -703,46 +884,28 @@ const App: React.FC = () => {
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
-    // Update pointer position
-    // FIX: Update pointer with type
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY, type: e.pointerType });
-
-    // --- Multi-touch Logic ---
-    // FIX: Filter to ensure we only have 2 TOUCH points (fingers). 
-    // This ignores the pen (type='pen') combined with a palm (type='touch') triggering zoom.
     const activePointers = Array.from(pointers.current.values()) as { x: number; y: number; type: string }[];
     const touchPointers = activePointers.filter(p => p.type === 'touch');
 
-    // Only enable pinch zoom if exactly 2 FINGERS are touching.
     if (touchPointers.length === 2) {
-       // Disable single finger panning to prevent conflict/jitter
        if (isPanning) setIsPanning(false);
-
-       if (mode === 'move') return; // Disable pinch zoom/pan in move segment mode if strictly required, or allow it. Let's block it for safety during precise move.
+       if (mode === 'move') return; 
 
        const p1 = touchPointers[0];
        const p2 = touchPointers[1];
-
        const currentDist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
        const currentCenter = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
 
        if (prevPinchDist.current !== null && prevPinchCenter.current !== null) {
           if (!svgRef.current) return;
           const rect = svgRef.current.getBoundingClientRect();
-          
-          // Calculate Zoom Factor
           const factor = currentDist / prevPinchDist.current;
           const newScale = Math.min(Math.max(scale * factor, 0.1), 10);
-          
-          // Math to calculate new offset to keep the world point under the pinch center stationary
-          // World point under previous center:
           const prevCenterRelX = prevPinchCenter.current.x - rect.left;
           const prevCenterRelY = prevPinchCenter.current.y - rect.top;
-          
           const worldX = (prevCenterRelX - offset.x) / scale;
           const worldY = (prevCenterRelY - offset.y) / scale;
-          
-          // New offset so that worldX maps to currentCenter
           const currentCenterRelX = currentCenter.x - rect.left;
           const currentCenterRelY = currentCenter.y - rect.top;
           
@@ -754,21 +917,17 @@ const App: React.FC = () => {
           setScale(newScale);
           setOffset(newOffset);
        }
-
        prevPinchDist.current = currentDist;
        prevPinchCenter.current = currentCenter;
-       return; // Stop other interactions when pinching
+       return; 
     }
 
-    // Normal single pointer interaction
     const worldPos = screenToWorld(e.clientX, e.clientY);
     setMousePos(worldPos);
     
-    // Snap needs to exclude current dragging object to avoid self-snapping anomalies (mostly for endpoints)
     const currentSnap = getSnappedPos(worldPos, draggingLine?.id || draggingCircle?.id);
     setSnapPos(currentSnap);
 
-    // Only Pan if strictly 1 pointer (avoids conflict with pinch which adds a 2nd pointer)
     if (isPanning && pointers.current.size === 1) {
       setOffset(prev => ({ 
         x: prev.x + (e.clientX - lastMousePos.x), 
@@ -782,105 +941,56 @@ const App: React.FC = () => {
         saveToHistory();
         setHasMoved(true);
       }
-
-      // Use absolute delta from start to prevent drift on touch devices
       const dx = currentSnap.x - dragStartPos.x;
       const dy = currentSnap.y - dragStartPos.y;
 
-      // Handle Line Dragging
       if (draggingLine) {
           if (dragAnchor && (mode === 'select' || mode === 'move') && dragOriginalLine) {
-            // Stretching endpoint (Using original coordinates + delta)
             setLines(prev => prev.map(l => {
               if (l.id !== draggingLine.id) return l;
               let newX1 = dragOriginalLine.x1, newY1 = dragOriginalLine.y1, newX2 = dragOriginalLine.x2, newY2 = dragOriginalLine.y2;
-              
               if (dragAnchor === 'start') {
-                newX1 = dragOriginalLine.x1 + dx; 
-                newY1 = dragOriginalLine.y1 + dy;
+                newX1 = dragOriginalLine.x1 + dx; newY1 = dragOriginalLine.y1 + dy;
               } else {
-                newX2 = dragOriginalLine.x2 + dx; 
-                newY2 = dragOriginalLine.y2 + dy;
+                newX2 = dragOriginalLine.x2 + dx; newY2 = dragOriginalLine.y2 + dy;
               }
               return { ...l, x1: newX1, y1: newY1, x2: newX2, y2: newY2 };
             }));
           } else {
-            // Moving whole line
             if (dx !== 0 || dy !== 0) {
-                // If we have an original snapshot (single line move), use it
                 if (dragOriginalLine && draggingLine.id !== -1) {
                     setLines(prev => prev.map(l => 
                         (l.id === draggingLine.id) 
-                          ? { 
-                              ...l, 
-                              x1: dragOriginalLine.x1 + dx, 
-                              y1: dragOriginalLine.y1 + dy, 
-                              x2: dragOriginalLine.x2 + dx, 
-                              y2: dragOriginalLine.y2 + dy 
-                            } 
+                          ? { ...l, x1: dragOriginalLine.x1 + dx, y1: dragOriginalLine.y1 + dy, x2: dragOriginalLine.x2 + dx, y2: dragOriginalLine.y2 + dy } 
                           : l
                     ));
                 } else {
-                    // Group move (fallback to incremental or needs snapshot of all selected - keeping incremental for group for now as simplicity trade-off, 
-                    // or user should select one by one. But usually drift is most noticeable on single precision tasks)
-                    // Note: To truly fix group drift, we'd need to snapshot ALL selected items. 
-                    // For now, let's just make sure single line move is rock solid.
-                    
-                    // Actually, if we are moving a selection group (where draggingLine.id might be dummy or part of group), 
-                    // we currently don't have snapshots for everyone. 
-                    // Let's stick to the incremental for group move BUT we need to update dragStartPos in that specific case.
-                    // However, for the specific user complaint "moving segment", it's usually single line.
-                    
-                    if (draggingLine.id !== -1) {
-                         // This block handles cases where we didn't snapshot (shouldn't happen with current logic for single)
-                         // Fallback
-                    } else {
-                         // Group Move - Incremental
-                         // We need to update dragStartPos here to avoid huge jumps because we aren't using absolute delta
-                         const incDx = currentSnap.x - dragStartPos.x; // This is actually absolute from start
-                         // This is tricky. If we want to use absolute delta for groups without snapshots, we can't.
-                         // We must use incremental for groups unless we snapshot everything.
-                         // Let's rely on the fact that `dragStartPos` is NOT updated in the Absolute Delta block usually.
-                         
-                         // Revert to incremental logic ONLY for group selections without snapshot
-                         // But wait, I changed `dragStartPos` to NOT update.
-                         // So I must update `dragStartPos` for incremental moves to work, OR implement snapshot for groups.
-                         
-                         // For now, let's just update dragStartPos for the Group Move case to keep it working as before (maybe with slight drift but functional)
-                         // While Single Move is perfect.
+                    if (draggingLine.id === -1) {
                          const iDx = currentSnap.x - dragStartPos.x;
                          const iDy = currentSnap.y - dragStartPos.y;
-                         
                          if (iDx !== 0 || iDy !== 0) {
                              setLines(prev => prev.map(l => l.selected ? { ...l, x1: l.x1 + iDx, y1: l.y1 + iDy, x2: l.x2 + iDx, y2: l.y2 + iDy } : l));
                              setCircles(prev => prev.map(c => c.selected ? { ...c, cx: c.cx + iDx, cy: c.cy + iDy } : c));
-                             setDragStartPos(currentSnap); // Update start pos for incremental
+                             setDragStartPos(currentSnap); 
                          }
                     }
                 }
             }
           }
-      } 
-      // Handle Circle Dragging
-      else if (draggingCircle && dragOriginalCircle) {
+      } else if (draggingCircle && dragOriginalCircle) {
            if (dx !== 0 || dy !== 0) {
                setCircles(prev => prev.map(c => 
                   (c.id === draggingCircle.id)
                     ? { ...c, cx: dragOriginalCircle.cx + dx, cy: dragOriginalCircle.cy + dy }
                     : c
                ));
-               // If there are other selected items, we might need similar logic to Lines, 
-               // but for now optimizing the single circle move.
            }
       }
     }
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
-    // Remove pointer
     pointers.current.delete(e.pointerId);
-    
-    // Check remaining touch pointers to reset pinch if needed
     const touchPointers = (Array.from(pointers.current.values()) as { x: number; y: number; type: string }[]).filter(p => p.type === 'touch');
     if (touchPointers.length < 2) {
        prevPinchDist.current = null;
@@ -914,10 +1024,7 @@ const App: React.FC = () => {
   };
 
   const handleToolChange = (newMode: ToolMode) => {
-    // Disable wallpaper move when selecting any tool
     setIsTouchMoveEnabled(false);
-
-    // If clicking the same tool again, deselect it (go back to select mode)
     if (mode === newMode) {
       setMode('select');
       setInteractionPoints([]);
@@ -935,7 +1042,6 @@ const App: React.FC = () => {
     const linesChanged = lines.some(l => l.selected);
     const circlesChanged = circles.some(c => c.selected);
     const dimsChanged = dims.some(d => d.selected);
-    
     if (linesChanged || circlesChanged || dimsChanged) {
       saveToHistory();
       setLines(lines.filter(l => !l.selected));
@@ -966,9 +1072,8 @@ const App: React.FC = () => {
     let deg = Math.abs((a1 - a2) * 180 / Math.PI);
     if (deg > 180) deg = 360 - deg;
     return Math.round(deg * 10) / 10 + "°";
-  }
+  };
 
-  // Calculate preview end point for drawing tools
   let previewEnd: Point | null = null;
   if (interactionPoints.length > 0) {
     if (mode === 'draw_poly') {
@@ -986,26 +1091,34 @@ const App: React.FC = () => {
 
   return (
     <div className="flex flex-col h-screen bg-slate-50 overflow-hidden select-none font-sans text-slate-700">
+      <input 
+        type="file" 
+        ref={fileInputRef} 
+        onChange={handleFileChange} 
+        accept=".json" 
+        className="hidden" 
+      />
       
       {/* Top Toolbar */}
       <div className="h-16 bg-white border-b border-slate-200 flex items-center px-4 shadow-sm z-20 justify-between">
-        
-        {/* Left: Common Operations & Measure */}
         <div className="flex items-center space-x-2">
           <div className="flex space-x-1 mr-4 border-r pr-4 border-slate-200">
-             <button 
-                onClick={undo}
-                disabled={history.length === 0}
-                className={`p-2 flex flex-col items-center justify-center border rounded w-16 h-16 text-[10px] transition-all duration-200 ${history.length === 0 ? 'opacity-50 cursor-not-allowed bg-slate-50' : 'bg-white hover:bg-slate-50 text-slate-600 border-slate-200 shadow-sm'}`}
-             >
+             <button onClick={handleSave} className="p-2 flex flex-col items-center justify-center border rounded w-16 h-16 text-[10px] transition-all duration-200 bg-white hover:bg-slate-50 text-slate-600 border-slate-200 shadow-sm">
+                <Save size={18} className="mb-1" />
+                <span className="text-center leading-tight">存檔</span>
+             </button>
+             <button onClick={handleLoadClick} className="p-2 flex flex-col items-center justify-center border rounded w-16 h-16 text-[10px] transition-all duration-200 bg-white hover:bg-slate-50 text-slate-600 border-slate-200 shadow-sm">
+                <FolderOpen size={18} className="mb-1" />
+                <span className="text-center leading-tight">讀檔</span>
+             </button>
+          </div>
+
+          <div className="flex space-x-1 mr-4 border-r pr-4 border-slate-200">
+             <button onClick={undo} disabled={history.length === 0} className={`p-2 flex flex-col items-center justify-center border rounded w-16 h-16 text-[10px] transition-all duration-200 ${history.length === 0 ? 'opacity-50 cursor-not-allowed bg-slate-50' : 'bg-white hover:bg-slate-50 text-slate-600 border-slate-200 shadow-sm'}`}>
                 <Undo2 size={18} className="mb-1" />
                 <span className="text-center leading-tight">回復</span>
              </button>
-             <button 
-                onClick={redo}
-                disabled={redoStack.length === 0}
-                className={`p-2 flex flex-col items-center justify-center border rounded w-16 h-16 text-[10px] transition-all duration-200 ${redoStack.length === 0 ? 'opacity-50 cursor-not-allowed bg-slate-50' : 'bg-white hover:bg-slate-50 text-slate-600 border-slate-200 shadow-sm'}`}
-             >
+             <button onClick={redo} disabled={redoStack.length === 0} className={`p-2 flex flex-col items-center justify-center border rounded w-16 h-16 text-[10px] transition-all duration-200 ${redoStack.length === 0 ? 'opacity-50 cursor-not-allowed bg-slate-50' : 'bg-white hover:bg-slate-50 text-slate-600 border-slate-200 shadow-sm'}`}>
                 <Redo2 size={18} className="mb-1" />
                 <span className="text-center leading-tight">重做</span>
              </button>
@@ -1014,17 +1127,11 @@ const App: React.FC = () => {
           <div className="flex space-x-1 mr-4 border-r pr-4 border-slate-200">
              <ToolButton id="select" currentMode={mode} icon={MousePointer2} label="選取" onClick={handleToolChange} />
              <ToolButton id="move" currentMode={mode} icon={Move} label="移動線段" onClick={handleToolChange} />
-             <button 
-                onClick={deleteSelected}
-                className="p-2 flex flex-col items-center justify-center border rounded w-16 h-16 text-[10px] transition-all duration-200 bg-white hover:bg-rose-50 text-rose-600 border-slate-200 hover:border-rose-200 shadow-sm"
-             >
+             <button onClick={deleteSelected} className="p-2 flex flex-col items-center justify-center border rounded w-16 h-16 text-[10px] transition-all duration-200 bg-white hover:bg-rose-50 text-rose-600 border-slate-200 hover:border-rose-200 shadow-sm">
                 <Trash2 size={18} className="mb-1" />
                 <span className="text-center leading-tight">刪除</span>
              </button>
-             <button 
-                onClick={clearCanvas}
-                className="p-2 flex flex-col items-center justify-center border rounded w-16 h-16 text-[10px] transition-all duration-200 bg-white hover:bg-rose-50 text-rose-600 border-slate-200 hover:border-rose-200 shadow-sm"
-             >
+             <button onClick={clearCanvas} className="p-2 flex flex-col items-center justify-center border rounded w-16 h-16 text-[10px] transition-all duration-200 bg-white hover:bg-rose-50 text-rose-600 border-slate-200 hover:border-rose-200 shadow-sm">
                 <Eraser size={18} className="mb-1" />
                 <span className="text-center leading-tight">清空</span>
              </button>
@@ -1036,34 +1143,31 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        {/* Center: Message */}
         <div className="flex-1 flex justify-center">
              <span className="text-indigo-600 font-bold text-sm bg-indigo-50 px-4 py-2 rounded-full border border-indigo-100">
                {message}
              </span>
         </div>
 
-        {/* Right: Params & Zoom */}
         <div className="flex items-center space-x-4">
              <div className="flex items-center space-x-2">
                 
-                {/* Wallpaper Move Button */}
+                {/* Supabase Cloud Buttons */}
+                <button onClick={handleCloudSaveClick} title="儲存至雲端" className="p-2 flex flex-col items-center justify-center border rounded w-16 h-16 text-[10px] transition-all duration-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200 shadow-sm">
+                  <CloudUpload size={18} className="mb-1" />
+                  <span className="text-center leading-tight">雲端存檔</span>
+                </button>
+                <button onClick={handleCloudLoadClick} title="從雲端讀取" className="p-2 flex flex-col items-center justify-center border rounded w-16 h-16 text-[10px] transition-all duration-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200 shadow-sm mr-2">
+                  <CloudDownload size={18} className="mb-1" />
+                  <span className="text-center leading-tight">雲端讀取</span>
+                </button>
+
                 <button 
                   onClick={() => {
-                    if (!isTouchMoveEnabled) {
-                      // Enabling wallpaper move, so disable move tool if active
-                      if (mode === 'move') {
-                        setMode('select');
-                        setMessage('已切換至選取模式');
-                      }
-                    }
+                    if (!isTouchMoveEnabled && mode === 'move') { setMode('select'); setMessage('已切換至選取模式'); }
                     setIsTouchMoveEnabled(!isTouchMoveEnabled);
                   }}
-                  className={`p-2 flex flex-col items-center justify-center border rounded w-16 h-16 text-[10px] transition-all duration-200 ${
-                    isTouchMoveEnabled 
-                      ? 'bg-indigo-600 text-white border-indigo-700 shadow-inner' 
-                      : 'bg-white hover:bg-slate-50 text-slate-500 border-slate-200 hover:border-slate-300 shadow-sm'
-                  }`}
+                  className={`p-2 flex flex-col items-center justify-center border rounded w-16 h-16 text-[10px] transition-all duration-200 ${isTouchMoveEnabled ? 'bg-indigo-600 text-white border-indigo-700 shadow-inner' : 'bg-white hover:bg-slate-50 text-slate-500 border-slate-200 hover:border-slate-300 shadow-sm'}`}
                 >
                   <Expand size={18} className="mb-1" />
                   <span className="text-center leading-tight">桌布移動</span>
@@ -1071,44 +1175,144 @@ const App: React.FC = () => {
 
                 <div className="flex flex-col items-end">
                   <label className="text-[9px] uppercase font-bold text-slate-400">長度/直徑</label>
-                  <input 
-                    type="number" 
-                    value={paramLength} 
-                    onChange={e => setParamLength(e.target.value)} 
-                    className="w-[4.5rem] border border-slate-300 rounded text-sm px-2 h-7 focus:outline-none focus:border-indigo-500 text-right" 
-                  />
+                  <input type="number" value={paramLength} onChange={e => setParamLength(e.target.value)} className="w-[4.5rem] border border-slate-300 rounded text-sm px-2 h-7 focus:outline-none focus:border-indigo-500 text-right" />
                 </div>
                 <div className="flex flex-col items-end">
                   <label className="text-[9px] uppercase font-bold text-slate-400">角度</label>
-                  <input 
-                    type="number" 
-                    value={paramAngle} 
-                    onChange={e => setParamAngle(e.target.value)} 
-                    className="w-16 border border-slate-300 rounded text-sm px-2 h-7 focus:outline-none focus:border-indigo-500 text-right" 
-                  />
+                  <input type="number" value={paramAngle} onChange={e => setParamAngle(e.target.value)} className="w-16 border border-slate-300 rounded text-sm px-2 h-7 focus:outline-none focus:border-indigo-500 text-right" />
                 </div>
              </div>
              <div className="h-8 w-px bg-slate-200 mx-2"></div>
              <div className="flex items-center space-x-1">
-                <button 
-                   onClick={() => handleManualZoom(-0.1)}
-                   className="p-1 hover:bg-slate-100 rounded text-slate-600 active:bg-slate-200 transition-colors"
-                >
+                <button onClick={() => handleManualZoom(-0.1)} className="p-1 hover:bg-slate-100 rounded text-slate-600 active:bg-slate-200 transition-colors">
                    <ZoomOut size={16} />
                 </button>
                 <span className="font-mono text-xs text-slate-500 w-12 text-center select-none">
                   {Math.round(scale * 100)}%
                 </span>
-                <button 
-                   onClick={() => handleManualZoom(0.1)}
-                   className="p-1 hover:bg-slate-100 rounded text-slate-600 active:bg-slate-200 transition-colors"
-                >
+                <button onClick={() => handleManualZoom(0.1)} className="p-1 hover:bg-slate-100 rounded text-slate-600 active:bg-slate-200 transition-colors">
                    <ZoomIn size={16} />
                 </button>
              </div>
         </div>
       </div>
 
+      {/* Cloud Modal */}
+      {showCloudModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center">
+          <div className="bg-white rounded-xl shadow-2xl p-6 w-96 transform transition-all scale-100 opacity-100">
+             
+             {/* Modal Header */}
+             <div className="flex justify-between items-center mb-4">
+               <h3 className="text-lg font-bold text-slate-800 flex items-center">
+                 {cloudMode === 'save' ? <CloudUpload size={20} className="mr-2 text-indigo-600"/> : <CloudDownload size={20} className="mr-2 text-indigo-600"/>}
+                 {cloudMode === 'save' ? '儲存至雲端' : '雲端檔案列表'}
+               </h3>
+               <button onClick={() => setShowCloudModal(false)} className="text-slate-400 hover:text-slate-600">
+                 <X size={20} />
+               </button>
+             </div>
+
+             {/* API Key Config Section */}
+             <div className="mb-4 p-3 bg-slate-50 border border-slate-200 rounded text-sm">
+                <div className="flex justify-between items-center mb-1">
+                   <p className="text-slate-700 font-bold flex items-center">
+                      <Settings size={14} className="mr-1"/> 
+                      API Key 設定
+                   </p>
+                   {supabaseKey && (
+                      <button 
+                        onClick={() => {
+                          setSupabaseKey('');
+                          localStorage.removeItem('cad_supabase_key');
+                        }} 
+                        className="text-xs text-indigo-600 hover:underline"
+                      >
+                        重新輸入
+                      </button>
+                   )}
+                </div>
+                
+                {!supabaseKey ? (
+                   <>
+                     <p className="text-slate-500 text-xs mb-2">請輸入 Supabase <b>Anon / Public Key</b> (長字串，非資料庫密碼)</p>
+                     <input 
+                        type="password" 
+                        placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6..." 
+                        className="w-full border border-slate-300 rounded px-2 py-1 text-xs font-mono"
+                        onChange={(e) => setSupabaseKey(e.target.value)}
+                        autoFocus
+                     />
+                   </>
+                ) : (
+                   <div className="flex items-center text-green-600 text-xs">
+                      <Check size={12} className="mr-1" /> 已儲存 API Key
+                   </div>
+                )}
+             </div>
+
+             {/* Content */}
+             <div className="space-y-4">
+               {supabaseKey ? (
+                 <>
+                   {cloudMode === 'save' ? (
+                      <div>
+                        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">檔案名稱</label>
+                        <input 
+                          type="text" 
+                          value={cloudFileName} 
+                          onChange={e => setCloudFileName(e.target.value)} 
+                          className="w-full border border-slate-300 rounded px-3 py-2 text-sm focus:outline-none focus:border-indigo-500"
+                          placeholder="請輸入名稱"
+                        />
+                        <div className="flex justify-end mt-4 space-x-2">
+                           <button onClick={() => setShowCloudModal(false)} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded">取消</button>
+                           <button onClick={performCloudSave} disabled={isLoadingCloud} className="px-4 py-2 text-sm bg-indigo-600 text-white hover:bg-indigo-700 rounded shadow-sm flex items-center">
+                             {isLoadingCloud ? <Loader2 className="animate-spin mr-1" size={14} /> : <Save size={14} className="mr-1"/>}
+                             {isLoadingCloud ? '儲存中...' : '儲存'}
+                           </button>
+                        </div>
+                      </div>
+                   ) : (
+                      <div className="max-h-60 overflow-y-auto border border-slate-100 rounded bg-slate-50 min-h-[100px]">
+                        {isLoadingCloud ? (
+                          <div className="p-4 text-center text-slate-400 text-sm flex items-center justify-center">
+                            <Loader2 className="animate-spin mr-2" size={16} /> 載入中...
+                          </div>
+                        ) : cloudFiles.length === 0 ? (
+                          <div className="p-4 text-center text-slate-400 text-sm">尚無檔案 (請確認 API Key 或 RLS 設定)</div>
+                        ) : (
+                          <ul className="divide-y divide-slate-100">
+                             {cloudFiles.map(file => (
+                               <li key={file.id} onClick={() => performCloudLoad(file)} className="p-3 hover:bg-white cursor-pointer transition-colors flex items-center justify-between group">
+                                  <div className="flex items-center overflow-hidden">
+                                     <div className="w-8 h-8 bg-indigo-50 rounded flex items-center justify-center text-indigo-400 mr-3 flex-shrink-0">
+                                        <FileText size={16} />
+                                     </div>
+                                     <div className="min-w-0">
+                                        <h4 className="font-medium text-slate-700 text-sm truncate">{file.name}</h4>
+                                        <p className="text-xs text-slate-400">{new Date(file.updated_at).toLocaleDateString()}</p>
+                                     </div>
+                                  </div>
+                                  <Check size={16} className="text-indigo-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                               </li>
+                             ))}
+                          </ul>
+                        )}
+                      </div>
+                   )}
+                 </>
+               ) : (
+                 <div className="text-center text-slate-400 py-4 text-sm">
+                   請先輸入 API Key 才能存取雲端。
+                 </div>
+               )}
+             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Workspace */}
       <div className="flex flex-1 overflow-hidden">
         {/* Left Sidebar: Draw Tools */}
         <div className="w-20 bg-white border-r border-slate-200 flex flex-col items-center py-4 space-y-3 z-10 shadow-lg overflow-y-auto">
@@ -1168,7 +1372,6 @@ const App: React.FC = () => {
                     strokeLinecap="round" 
                     className="transition-colors duration-100"
                   />
-                  {/* Invisible Hit Area (Thicker) */}
                   <line 
                     x1={line.x1} y1={line.y1} 
                     x2={line.x2} y2={line.y2} 
@@ -1191,7 +1394,6 @@ const App: React.FC = () => {
                      fill="transparent"
                      className="transition-colors duration-100"
                    />
-                   {/* Invisible Hit Area (Thicker Rim) */}
                    <circle
                      cx={circle.cx}
                      cy={circle.cy}
@@ -1201,7 +1403,6 @@ const App: React.FC = () => {
                      fill="transparent"
                      className="cursor-pointer"
                    />
-                   {/* Center Point Marker (Visual aid when selected or hovering) */}
                    {(circle.selected || mode === 'draw_poly') && (
                       <circle cx={circle.cx} cy={circle.cy} r={2/scale} fill="#f43f5e" opacity={0.5} />
                    )}
@@ -1235,7 +1436,6 @@ const App: React.FC = () => {
                     )
                 }
 
-                // Dist dim
                 const angle = Math.atan2(d.p2.y - d.p1.y, d.p2.x - d.p1.x);
                 const l = dist(d.p1, d.p2);
                 const ux = (d.p2.x - d.p1.x) / l;
@@ -1278,7 +1478,6 @@ const App: React.FC = () => {
                 );
               })}
 
-              {/* Interaction Preview */}
               {interactionPoints.length > 0 && previewEnd && (
                 <line 
                   x1={interactionPoints[0].x} y1={interactionPoints[0].y} 
@@ -1303,12 +1502,10 @@ const App: React.FC = () => {
                   <circle cx={getLineIntersection(selectedLinesForTool[0], selectedLinesForTool[1])?.x || 0} cy={getLineIntersection(selectedLinesForTool[0], selectedLinesForTool[1])?.y || 0} r={dist(getLineIntersection(selectedLinesForTool[0], selectedLinesForTool[1]) || {x:0,y:0}, mousePos)} stroke="#f43f5e" strokeWidth={1/scale} fill="none" opacity={0.3} strokeDasharray={`${4/scale},${2/scale}`} />
               )}
               
-              {/* Circle Preview Cursor */}
               {mode === 'draw_circle' && snapPos && (
                  <circle cx={snapPos.x} cy={snapPos.y} r={(parseFloat(paramLength) || 0) / 2} stroke="#4f46e5" strokeWidth={1/scale} fill="none" opacity={0.5} strokeDasharray={`${4/scale},${2/scale}`} />
               )}
 
-              {/* Snap Marker */}
               {snapPos && (
                 <g transform={`translate(${snapPos.x}, ${snapPos.y})`}>
                   {snapPos.type === 'intersection' ? (
