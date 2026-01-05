@@ -4,13 +4,13 @@ import {
   Scissors, ArrowUpRight, Ruler, Eraser, Hand,
   Trash2, RotateCw, Undo2, Redo2, Maximize, Move,
   Circle as CircleIcon, ZoomIn, ZoomOut,
-  Expand, 
+  Expand, Copy, RefreshCw,
   Save, FolderOpen,
   CloudUpload, CloudDownload, X, FileText, Check, Settings, Loader2
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 import { ToolButton } from './components/ToolButton';
-import { dist, getIntersection, getLineIntersection, distToSegment } from './utils';
+import { dist, getIntersection, getLineIntersection, distToSegment, getLineCircleIntersection, getCircleCircleIntersection } from './utils';
 import { GRID_SIZE, SNAP_RADIUS } from './constants';
 import { Line, Circle, Point, Dimension, SnapPoint, ToolMode } from './types';
 
@@ -27,9 +27,10 @@ const getToolName = (mode: ToolMode): string => {
     'draw_fixed_h': '水平線',
     'draw_fixed_v': '垂直線',
     'draw_fixed_a': '角度線',
-    'draw_circle': '畫圓(直徑)',
+    'draw_circle': '畫圓(半徑)',
     'trim': '修剪',
     'extend': '延伸',
+    'rotate_copy': '旋轉複製',
     'dim_dist': '長度標註',
     'dim_angle': '角度標註'
   };
@@ -97,7 +98,7 @@ const App: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Parameters
-  const [paramLength, setParamLength] = useState<string>("1000");
+  const [paramLength, setParamLength] = useState<string>("500");
   const [paramAngle, setParamAngle] = useState<string>("45");
   
   const svgRef = useRef<SVGSVGElement>(null);
@@ -328,6 +329,105 @@ const App: React.FC = () => {
      }
   };
 
+  const handleCopy = () => {
+    const selectedL = lines.filter(l => l.selected);
+    const selectedC = circles.filter(c => c.selected);
+    
+    if (selectedL.length === 0 && selectedC.length === 0) {
+       setMessage("無選取物件");
+       return;
+    }
+
+    saveToHistory();
+    const offset = 20 / scale; // Screen visual offset, adjusted for scale so it's noticeable
+
+    // Create copies with new IDs and offset
+    const newLines = selectedL.map(l => ({
+      ...l, 
+      id: Date.now() + Math.random(), 
+      x1: l.x1 + offset, 
+      y1: l.y1 + offset, 
+      x2: l.x2 + offset, 
+      y2: l.y2 + offset, 
+      selected: true
+    }));
+    
+    const newCircles = selectedC.map(c => ({
+      ...c, 
+      id: Date.now() + Math.random(), 
+      cx: c.cx + offset, 
+      cy: c.cy + offset, 
+      selected: true
+    }));
+
+    // Deselect originals and add copies
+    setLines(prev => prev.map(l => ({...l, selected: false})).concat(newLines));
+    setCircles(prev => prev.map(c => ({...c, selected: false})).concat(newCircles));
+    setMessage("物件已複製");
+  };
+
+  const performRotateCopy = (center: Point) => {
+    const selectedL = lines.filter(l => l.selected);
+    const selectedC = circles.filter(c => c.selected);
+
+    if (selectedL.length === 0 && selectedC.length === 0) {
+      setMessage("無選取物件，無法旋轉");
+      setMode('select');
+      return;
+    }
+
+    saveToHistory();
+    const angleDeg = parseFloat(paramAngle) || 0;
+    // CAD rotation is usually counter-clockwise positive. 
+    // In SVG screen coords (Y down), positive angle in Math formulas goes clockwise.
+    // To achieve standard CAD behavior (CCW), we negate the angle.
+    const angleRad = (-angleDeg * Math.PI) / 180;
+
+    const cosA = Math.cos(angleRad);
+    const sinA = Math.sin(angleRad);
+
+    const rotatePoint = (p: Point): Point => {
+      const dx = p.x - center.x;
+      const dy = p.y - center.y;
+      return {
+        x: center.x + dx * cosA - dy * sinA,
+        y: center.y + dx * sinA + dy * cosA
+      };
+    };
+
+    const newLines = selectedL.map(l => {
+      const p1 = rotatePoint({x: l.x1, y: l.y1});
+      const p2 = rotatePoint({x: l.x2, y: l.y2});
+      return {
+        ...l,
+        id: Date.now() + Math.random(),
+        x1: p1.x,
+        y1: p1.y,
+        x2: p2.x,
+        y2: p2.y,
+        selected: true
+      };
+    });
+
+    const newCircles = selectedC.map(c => {
+      const p = rotatePoint({x: c.cx, y: c.cy});
+      return {
+        ...c,
+        id: Date.now() + Math.random(),
+        cx: p.x,
+        cy: p.y,
+        selected: true
+      };
+    });
+
+    // Deselect originals and add rotated copies
+    setLines(prev => prev.map(l => ({...l, selected: false})).concat(newLines));
+    setCircles(prev => prev.map(c => ({...c, selected: false})).concat(newCircles));
+    
+    setMode('select');
+    setMessage(`已旋轉複製 ${angleDeg}°`);
+  };
+
   // Global Key Handlers
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -402,8 +502,10 @@ const App: React.FC = () => {
     let closest: SnapPoint | null = null;
     let minD = SNAP_RADIUS / scale;
 
+    // Line Checks
     lines.forEach(line => {
       if (excludeId && line.id === excludeId) return; 
+      // Endpoints
       const points: Point[] = [{x: line.x1, y: line.y1}, {x: line.x2, y: line.y2}];
       points.forEach(p => {
         const d = dist(worldPos, p);
@@ -412,8 +514,17 @@ const App: React.FC = () => {
           closest = { ...p, type: 'endpoint' }; 
         }
       });
+      
+      // Midpoint
+      const mid: Point = { x: (line.x1 + line.x2) / 2, y: (line.y1 + line.y2) / 2 };
+      const dMid = dist(worldPos, mid);
+      if (dMid < minD) {
+          minD = dMid;
+          closest = { ...mid, type: 'midpoint' };
+      }
     });
 
+    // Circle Checks
     circles.forEach(circle => {
        if (excludeId && circle.id === excludeId) return;
        const d = dist(worldPos, {x: circle.cx, y: circle.cy});
@@ -423,6 +534,7 @@ const App: React.FC = () => {
        }
     });
 
+    // Line-Line Intersections
     for (let i = 0; i < lines.length; i++) {
         const l1 = lines[i];
         if (excludeId && l1.id === excludeId) continue;
@@ -441,6 +553,42 @@ const App: React.FC = () => {
                      }
                 }
             }
+        }
+    }
+
+    // Line-Circle Intersections
+    for (const line of lines) {
+        if (excludeId && line.id === excludeId) continue;
+        for (const circle of circles) {
+            if (excludeId && circle.id === excludeId) continue;
+            
+            const intersects = getLineCircleIntersection(line, circle);
+            intersects.forEach(p => {
+               const d = dist(worldPos, p);
+               if (d < minD) {
+                   minD = d;
+                   closest = { ...p, type: 'intersection' };
+               }
+            });
+        }
+    }
+
+    // Circle-Circle Intersections
+    for (let i = 0; i < circles.length; i++) {
+        const c1 = circles[i];
+        if (excludeId && c1.id === excludeId) continue;
+        for (let j = i + 1; j < circles.length; j++) {
+            const c2 = circles[j];
+            if (excludeId && c2.id === excludeId) continue;
+            
+            const intersects = getCircleCircleIntersection(c1, c2);
+            intersects.forEach(p => {
+               const d = dist(worldPos, p);
+               if (d < minD) {
+                   minD = d;
+                   closest = { ...p, type: 'intersection' };
+               }
+            });
         }
     }
 
@@ -548,6 +696,7 @@ const App: React.FC = () => {
     let closestInt: Point | null = null;
     let minDist = Infinity;
 
+    // Check Lines
     lines.forEach(other => {
       if(other.id === targetLine.id) return;
       const int = getLineIntersection(targetLine, other);
@@ -569,6 +718,33 @@ const App: React.FC = () => {
       }
     });
 
+    // Check Circles
+    circles.forEach(circle => {
+        // Ray-Circle Intersection: P = Start + t * Dir
+        // |P - C| = r => (Start + t*Dir - C)^2 = r^2
+        // Let L = Start - C
+        // (L + t*Dir)^2 = r^2 => t^2 + 2(L.Dir)t + (L.L - r^2) = 0
+        const lx = endPt.x - circle.cx;
+        const ly = endPt.y - circle.cy;
+        const B = 2 * (lx * ux + ly * uy);
+        const C = (lx * lx + ly * ly) - circle.r * circle.r;
+        const det = B * B - 4 * C;
+        
+        if (det >= 0) {
+            const t1 = (-B - Math.sqrt(det)) / 2;
+            const t2 = (-B + Math.sqrt(det)) / 2;
+            
+            [t1, t2].forEach(t => {
+                if (t > 0.001) {
+                   if (t < minDist) {
+                      minDist = t;
+                      closestInt = { x: endPt.x + t * ux, y: endPt.y + t * uy };
+                   }
+                }
+            });
+        }
+    });
+
     if (closestInt) {
       saveToHistory();
       setLines(prev => prev.map(l => {
@@ -585,13 +761,33 @@ const App: React.FC = () => {
   const performTrim = (targetLine: Line, clickPos: Point) => {
     const tValues: number[] = [0, 1];
     
+    // Line Intersections
     lines.forEach(other => {
       if (other.id === targetLine.id) return;
-      
       const intersection = getIntersection(targetLine, other);
       if (intersection) {
-        tValues.push(intersection.t);
+        // Important: Check if the intersection is actually ON the other segment (0 <= u <= 1)
+        if (intersection.u >= 0 && intersection.u <= 1) {
+             tValues.push(intersection.t);
+        }
       }
+    });
+
+    // Circle Intersections
+    circles.forEach(circle => {
+       const points = getLineCircleIntersection(targetLine, circle);
+       points.forEach(p => {
+          // Project intersection point back to t parameter on targetLine
+          const dx = targetLine.x2 - targetLine.x1;
+          const dy = targetLine.y2 - targetLine.y1;
+          let t = 0;
+          if (Math.abs(dx) > Math.abs(dy)) {
+             t = (p.x - targetLine.x1) / dx;
+          } else {
+             t = (p.y - targetLine.y1) / dy;
+          }
+          tValues.push(t);
+       });
     });
     
     tValues.sort((a, b) => a - b);
@@ -611,12 +807,14 @@ const App: React.FC = () => {
     if (len2 > 0) {
        tClick = ((clickPos.x - targetLine.x1) * dx + (clickPos.y - targetLine.y1) * dy) / len2;
     }
+    // Clamp tClick to valid range for selection but allow trimming at ends
     tClick = Math.max(0, Math.min(1, tClick));
 
     let tStart = -1;
     let tEnd = -1;
     
     for (let i = 0; i < uniqueT.length - 1; i++) {
+        // Using a slightly wider epsilon for click detection to ensure user can select the segment
         if (tClick >= uniqueT[i] - 0.001 && tClick <= uniqueT[i+1] + 0.001) {
             tStart = uniqueT[i];
             tEnd = uniqueT[i+1];
@@ -696,7 +894,7 @@ const App: React.FC = () => {
         }
         
         let anchorFound = false;
-        if (mode === 'select' || mode === 'move') {
+        if (mode === 'select') {
             const snapThreshold = 10 / scale;
             const d1 = dist(worldPos, {x: clickedLine.x1, y: clickedLine.y1});
             const d2 = dist(worldPos, {x: clickedLine.x2, y: clickedLine.y2});
@@ -821,8 +1019,8 @@ const App: React.FC = () => {
       setMessage("角度線已建立");
     } else if (mode === 'draw_circle') {
       saveToHistory();
-      const diameter = parseFloat(paramLength) || 0;
-      const radius = diameter / 2;
+      // Changed: Treat paramLength as radius directly
+      const radius = parseFloat(paramLength) || 0;
       setCircles([...circles, {
         id: Date.now(),
         cx: currentPos.x,
@@ -890,7 +1088,19 @@ const App: React.FC = () => {
       const clickedLine = getLineAtPos(worldPos);
       if (clickedLine) {
         performExtend(clickedLine, worldPos);
+      } else {
+        // Optional feedback if click missed
+        // setMessage("未偵測到線段");
       }
+    } else if (mode === 'trim') {
+      const clickedLine = getLineAtPos(worldPos);
+      if (clickedLine) {
+        performTrim(clickedLine, worldPos);
+      } else {
+        // Optional feedback if click missed
+      }
+    } else if (mode === 'rotate_copy') {
+      performRotateCopy(currentPos);
     }
   };
 
@@ -936,8 +1146,19 @@ const App: React.FC = () => {
     const worldPos = screenToWorld(e.clientX, e.clientY);
     setMousePos(worldPos);
     
-    const currentSnap = getSnappedPos(worldPos, draggingLine?.id || draggingCircle?.id);
-    setSnapPos(currentSnap);
+    // Logic to control when snapping is active
+    // Removed 'trim' and 'extend' from isDrawingTool to disable snapping and prevent click blocking
+    const isDrawingTool = ['draw_poly', 'draw_fixed_h', 'draw_fixed_v', 'draw_fixed_a', 'draw_circle', 'dim_dist', 'dim_angle', 'rotate_copy'].includes(mode);
+    const isDragging = !!draggingLine || !!draggingCircle;
+    // We want to snap if we are using a tool, dragging something, or in the middle of a multi-step operation
+    const shouldSnap = isDrawingTool || isDragging || interactionPoints.length > 0 || selectedLinesForTool.length > 0;
+
+    if (shouldSnap) {
+        const currentSnap = getSnappedPos(worldPos, draggingLine?.id || draggingCircle?.id);
+        setSnapPos(currentSnap);
+    } else {
+        setSnapPos(null);
+    }
 
     if (isPanning && pointers.current.size === 1) {
       setOffset(prev => ({ 
@@ -948,6 +1169,9 @@ const App: React.FC = () => {
     }
 
     if ((draggingLine || draggingCircle) && dragStartPos) {
+      // Force calculation of snap pos during drag even if logic above missed it (safeguard)
+      const currentSnap = getSnappedPos(worldPos, draggingLine?.id || draggingCircle?.id);
+      
       if (!hasMoved) {
         saveToHistory();
         setHasMoved(true);
@@ -1036,6 +1260,17 @@ const App: React.FC = () => {
 
   const handleToolChange = (newMode: ToolMode) => {
     setIsTouchMoveEnabled(false);
+
+    if (newMode === 'rotate_copy') {
+       const hasSelection = lines.some(l => l.selected) || circles.some(c => c.selected);
+       if (!hasSelection) {
+         setMessage("請先選取物件");
+         return;
+       }
+       setMode('rotate_copy');
+       setMessage("請點選旋轉中心點");
+       return;
+    }
 
     // Clear any existing selection when switching tools
     setLines(prev => prev.map(l => ({ ...l, selected: false })));
@@ -1145,6 +1380,10 @@ const App: React.FC = () => {
           <div className="flex space-x-1 mr-4 border-r pr-4 border-slate-200">
              <ToolButton id="select" currentMode={mode} icon={MousePointer2} label="選取" onClick={handleToolChange} />
              <ToolButton id="move" currentMode={mode} icon={Move} label="移動線段" onClick={handleToolChange} />
+             <button onClick={handleCopy} className="p-2 flex flex-col items-center justify-center border rounded w-16 h-16 text-[10px] transition-all duration-200 bg-white hover:bg-slate-50 text-slate-600 border-slate-200 shadow-sm">
+                <Copy size={18} className="mb-1" />
+                <span className="text-center leading-tight">複製</span>
+             </button>
              <button onClick={deleteSelected} className="p-2 flex flex-col items-center justify-center border rounded w-16 h-16 text-[10px] transition-all duration-200 bg-white hover:bg-rose-50 text-rose-600 border-slate-200 hover:border-rose-200 shadow-sm">
                 <Trash2 size={18} className="mb-1" />
                 <span className="text-center leading-tight">刪除</span>
@@ -1192,7 +1431,8 @@ const App: React.FC = () => {
                 </button>
 
                 <div className="flex flex-col items-end">
-                  <label className="text-[9px] uppercase font-bold text-slate-400">長度/直徑</label>
+                  {/* Changed label from Diameter to Radius */}
+                  <label className="text-[9px] uppercase font-bold text-slate-400">長度/半徑</label>
                   <input type="number" value={paramLength} onChange={e => setParamLength(e.target.value)} className="w-[4.5rem] border border-slate-300 rounded text-sm px-2 h-7 focus:outline-none focus:border-indigo-500 text-right" />
                 </div>
                 <div className="flex flex-col items-end">
@@ -1344,6 +1584,7 @@ const App: React.FC = () => {
           <div className="w-12 h-px bg-slate-200 my-1" />
           <ToolButton id="trim" currentMode={mode} icon={Scissors} label="修剪" onClick={handleToolChange} />
           <ToolButton id="extend" currentMode={mode} icon={Maximize} label="延伸" onClick={handleToolChange} />
+          <ToolButton id="rotate_copy" currentMode={mode} icon={RefreshCw} label="旋轉複製" onClick={handleToolChange} />
         </div>
 
         {/* Canvas Area */}
@@ -1375,12 +1616,6 @@ const App: React.FC = () => {
                 <g 
                   key={line.id} 
                   className="group"
-                  onPointerDown={(e) => {
-                    if (mode === 'trim') {
-                      e.stopPropagation();
-                      performTrim(line, screenToWorld(e.clientX, e.clientY));
-                    }
-                  }}
                 >
                   <line 
                     x1={line.x1} y1={line.y1} 
@@ -1393,7 +1628,7 @@ const App: React.FC = () => {
                   <line 
                     x1={line.x1} y1={line.y1} 
                     x2={line.x2} y2={line.y2} 
-                    stroke="transparent" 
+                    stroke="rgba(0,0,0,0)" 
                     strokeWidth={12 / scale} 
                     className={`${mode === 'trim' ? 'cursor-alias hover:stroke-rose-500/20' : (mode === 'extend' ? 'cursor-alias hover:stroke-indigo-500/20' : 'cursor-pointer')}`}
                   />
@@ -1521,7 +1756,11 @@ const App: React.FC = () => {
               )}
               
               {mode === 'draw_circle' && snapPos && (
-                 <circle cx={snapPos.x} cy={snapPos.y} r={(parseFloat(paramLength) || 0) / 2} stroke="#4f46e5" strokeWidth={1/scale} fill="none" opacity={0.5} strokeDasharray={`${4/scale},${2/scale}`} />
+                 // Updated to use radius directly
+                 <circle cx={snapPos.x} cy={snapPos.y} r={parseFloat(paramLength) || 0} stroke="#4f46e5" strokeWidth={1/scale} fill="none" opacity={0.5} strokeDasharray={`${4/scale},${2/scale}`} />
+              )}
+              {mode === 'rotate_copy' && snapPos && (
+                 <circle cx={snapPos.x} cy={snapPos.y} r={3/scale} stroke="#4f46e5" strokeWidth={2/scale} fill="none" />
               )}
 
               {snapPos && (
@@ -1531,6 +1770,9 @@ const App: React.FC = () => {
                         <line x1={-6/scale} y1={-6/scale} x2={6/scale} y2={6/scale} />
                         <line x1={6/scale} y1={-6/scale} x2={-6/scale} y2={6/scale} />
                      </g>
+                  ) : snapPos.type === 'midpoint' ? (
+                    // Triangle for midpoint
+                    <polygon points={`0,${-5/scale} ${5/scale},${4/scale} ${-5/scale},${4/scale}`} fill="none" stroke="#f43f5e" strokeWidth={2/scale} />
                   ) : (
                     <rect 
                       x={-4 / scale} y={-4 / scale} 

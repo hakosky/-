@@ -34,7 +34,7 @@ export interface Dimension {
 }
 
 export interface SnapPoint extends Point {
-  type: 'endpoint' | 'grid' | 'center' | 'intersection';
+  type: 'endpoint' | 'grid' | 'center' | 'intersection' | 'midpoint';
 }
 
 export type ToolMode = 
@@ -48,5 +48,6 @@ export type ToolMode =
   | 'draw_circle'
   | 'trim' 
   | 'extend'
+  | 'rotate_copy'
   | 'dim_dist'
   | 'dim_angle';
